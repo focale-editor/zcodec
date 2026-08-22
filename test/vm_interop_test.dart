@@ -24,4 +24,11 @@ void main() {
     expect(native.decode(codec.encode(input)), orderedEquals(input));
     expect(codec.decode(native.encode(input)), orderedEquals(input));
   });
+
+  test('Dart native GZIP and ZCodec decode each other', () {
+    final Uint8List input = Uint8List.fromList(<int>[for (int index = 0; index < 100000; index++) (index * 97 + index ~/ 31) & 0xff]);
+    const GzipCodec codec = GzipCodec();
+    expect(io.gzip.decode(codec.encode(input)), orderedEquals(input));
+    expect(codec.decode(io.gzip.encode(input)), orderedEquals(input));
+  });
 }
