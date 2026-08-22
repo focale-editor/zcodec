@@ -2,6 +2,18 @@ import 'dart:typed_data';
 
 import 'package:zcodec/src/exception.dart';
 
+/// Contains one decoded DEFLATE stream and its compressed byte length.
+final class DeflateDecodeResult {
+  /// Uncompressed bytes produced by the stream.
+  final Uint8List data;
+
+  /// Number of input bytes consumed through the final block boundary.
+  final int bytesRead;
+
+  /// Creates a decoded stream result.
+  const DeflateDecodeResult({required this.data, required this.bytesRead});
+}
+
 /// Encodes and decodes raw RFC 1951 DEFLATE streams in pure Dart.
 final class DeflateCodec {
   /// Creates a stateless DEFLATE codec.
@@ -29,6 +41,20 @@ final class DeflateCodec {
   /// A [ZCodecException] is thrown for malformed input or when the output
   /// would exceed [maxOutputBytes].
   Uint8List decode(List<int> input, {int? maxOutputBytes}) {
+    final Uint8List bytes = _asBytes(input);
+    final DeflateDecodeResult result = decodePrefix(bytes, maxOutputBytes: maxOutputBytes);
+    if (result.bytesRead != bytes.length) {
+      throw const ZCodecException('Unexpected bytes after the final DEFLATE block');
+    }
+    return result.data;
+  }
+
+  /// Decompresses the first stream in [input] and reports its consumed length.
+  ///
+  /// Unlike [decode], this method permits trailing bytes. It is intended for
+  /// container formats such as GZIP, whose trailer follows a raw DEFLATE
+  /// stream without storing the compressed stream length separately.
+  DeflateDecodeResult decodePrefix(List<int> input, {int? maxOutputBytes}) {
     if (maxOutputBytes != null && maxOutputBytes < 0) {
       throw RangeError.value(maxOutputBytes, 'maxOutputBytes', 'Must not be negative');
     }
@@ -37,10 +63,7 @@ final class DeflateCodec {
       final _BitReader reader = _BitReader(bytes);
       final Uint8List result = _DeflateDecoder(reader, maxOutputBytes ?? 0x7fffffff).decode();
       reader.alignToByte();
-      if (reader.byteOffset != bytes.length) {
-        throw const ZCodecException('Unexpected bytes after the final DEFLATE block');
-      }
-      return result;
+      return DeflateDecodeResult(data: result, bytesRead: reader.byteOffset);
     } on ZCodecException {
       rethrow;
     } on Object catch (error) {

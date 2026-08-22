@@ -57,6 +57,128 @@ void main() {
     });
   });
 
+  group('GzipCodec', () {
+    const GzipCodec codec = GzipCodec();
+
+    test('emits the canonical metadata-free empty member', () {
+      expect(
+        codec.encode(const <int>[]),
+        orderedEquals(<int>[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+      );
+    });
+
+    test('round-trips concatenated members and optional metadata', () {
+      final DateTime modified = DateTime.utc(2026, 8, 22, 12, 34, 56);
+      final Uint8List encoded = codec.encodeMembers(<GzipMember>[
+        GzipMember(
+          data: utf8.encode('first'),
+          modified: modified,
+          name: 'café.txt',
+          comment: 'métadonnées',
+          extra: <int>[1, 2, 3],
+          operatingSystem: 3,
+          isText: true,
+          headerChecksum: true,
+        ),
+        GzipMember(data: utf8.encode('second')),
+      ]);
+
+      final List<GzipMember> members = codec.decodeMembers(encoded);
+      expect(members.length, 2);
+      expect(utf8.decode(codec.decode(encoded)), 'firstsecond');
+      expect(members.first.modified, modified);
+      expect(members.first.name, 'café.txt');
+      expect(members.first.comment, 'métadonnées');
+      expect(members.first.extra, orderedEquals(<int>[1, 2, 3]));
+      expect(members.first.operatingSystem, 3);
+      expect(members.first.isText, isTrue);
+      expect(members.first.headerChecksum, isTrue);
+    });
+
+    test('validates checksums, output limits, and member limits', () {
+      final Uint8List damaged = codec.encode(utf8.encode('checksum'));
+      damaged[damaged.length - 8] ^= 1;
+      expect(() => codec.decode(damaged), throwsA(isA<ZCodecException>()));
+      expect(() => codec.decode(codec.encode(Uint8List(32)), maxOutputBytes: 16), throwsA(isA<ZCodecException>()));
+      final Uint8List concatenated = codec.encodeMembers(<GzipMember>[
+        GzipMember(data: const <int>[1]),
+        GzipMember(data: const <int>[2]),
+      ]);
+      expect(() => codec.decode(concatenated, maxMembers: 1), throwsA(isA<ZCodecException>()));
+    });
+  });
+
+  group('TAR', () {
+    const TarEncoder encoder = TarEncoder();
+    const TarDecoder decoder = TarDecoder();
+
+    test('round-trips ustar, links, and PAX metadata', () {
+      final String longName = '${'nested/' * 40}payload.txt';
+      final DateTime modified = DateTime.fromMicrosecondsSinceEpoch(1787402096123456, isUtc: true);
+      final TarArchive source = TarArchive(
+        entries: <TarEntry>[
+          TarEntry(name: 'directory/', type: TarEntryType.directory, mode: 0x1ed, modified: modified),
+          TarEntry(
+            name: longName,
+            data: utf8.encode('payload'),
+            mode: 0x1a4,
+            userId: 3000000,
+            groupId: 4000000,
+            userName: 'a-very-long-user-name-that-needs-pax',
+            groupName: 'a-very-long-group-name-that-needs-pax',
+            modified: modified,
+            paxHeaders: const <String, String>{'comment': 'custom metadata'},
+          ),
+          TarEntry(name: 'link', type: TarEntryType.symbolicLink, linkName: longName, modified: modified),
+        ],
+      );
+
+      final Uint8List encoded = encoder.encode(source);
+      final TarArchive archive = decoder.decode(encoded);
+      expect(encoded.length % 512, 0);
+      expect(archive.entries.length, 3);
+      expect(archive.find('directory/')!.isDirectory, isTrue);
+      final TarEntry payload = archive.find(longName)!;
+      expect(utf8.decode(payload.data), 'payload');
+      expect(payload.userId, 3000000);
+      expect(payload.groupId, 4000000);
+      expect(payload.modified, modified);
+      expect(payload.paxHeaders['comment'], 'custom metadata');
+      expect(archive.find('link')!.linkName, longName);
+    });
+
+    test('validates checksums, limits, and extraction paths', () {
+      final Uint8List damaged = encoder.encode(
+        TarArchive(
+          entries: <TarEntry>[
+            TarEntry(name: 'file', data: const <int>[1, 2, 3]),
+          ],
+        ),
+      );
+      damaged[0] ^= 1;
+      expect(() => decoder.decode(damaged), throwsA(isA<ZCodecException>()));
+      final Uint8List encoded = encoder.encode(
+        TarArchive(
+          entries: <TarEntry>[TarEntry(name: 'file', data: Uint8List(32))],
+        ),
+      );
+      expect(() => const TarDecoder(limits: TarLimits(maxEntryBytes: 16)).decode(encoded), throwsA(isA<ZCodecException>()));
+      expect(TarEntry(name: '../outside', data: const <int>[]).hasSafePath, isFalse);
+      expect(TarEntry(name: 'inside/file', data: const <int>[]).hasSafePath, isTrue);
+      expect(TarEntry(name: 'link', type: TarEntryType.symbolicLink, linkName: '../outside').hasSafeLinkTarget, isFalse);
+    });
+
+    test('preserves negative fractional PAX timestamps', () {
+      final DateTime modified = DateTime.fromMicrosecondsSinceEpoch(-500000, isUtc: true);
+      final Uint8List encoded = encoder.encode(
+        TarArchive(
+          entries: <TarEntry>[TarEntry(name: 'historic', modified: modified)],
+        ),
+      );
+      expect(decoder.decode(encoded).entries.single.modified, modified);
+    });
+  });
+
   group('ZIP', () {
     const ZipEncoder encoder = ZipEncoder();
     const ZipDecoder decoder = ZipDecoder();
