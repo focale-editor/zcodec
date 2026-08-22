@@ -13,6 +13,6 @@ dev_dependencies:
 
 release:
   changelog:
-    header: '# ZCodec changelog'
+    header: '# 📰 ZCodec changelog'
     defaultIgnoredTypes: ['test']
     defaultIgnoredScopes: ['repo', 'docs', 'version', 'deps', 'tools']
