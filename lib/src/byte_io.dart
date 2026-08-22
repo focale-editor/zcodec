@@ -33,6 +33,16 @@ final class ByteWriter {
       ..addByte((value >>> 24) & 0xff);
   }
 
+  /// Appends a little-endian 64-bit integer.
+  void writeUint64(int value) {
+    if (value < 0) {
+      throw RangeError.value(value, 'value', 'Must not be negative');
+    }
+    for (int index = 0; index < 8; index++) {
+      _bytes.addByte((value ~/ (1 << (index * 8))) & 0xff);
+    }
+  }
+
   /// Appends a big-endian 32-bit integer.
   void writeUint32BigEndian(int value) {
     _bytes
@@ -80,6 +90,17 @@ final class ByteReader {
     final int value = bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24);
     offset += 4;
     return value & 0xffffffff;
+  }
+
+  /// Reads a little-endian 64-bit integer.
+  int readUint64() {
+    _require(8);
+    int value = 0;
+    for (int index = 0; index < 8; index++) {
+      value += bytes[offset + index] * (1 << (index * 8));
+    }
+    offset += 8;
+    return value;
   }
 
   /// Reads [length] bytes without copying them.

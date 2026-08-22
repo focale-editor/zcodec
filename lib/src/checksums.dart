@@ -38,10 +38,13 @@ final class Crc32Accumulator {
   /// Incorporates [bytes] into the checksum.
   void add(List<int> bytes) {
     for (final int byte in bytes) {
-      _state = _crcTable[(_state ^ byte) & 0xff] ^ (_state >>> 8);
+      _state = crc32UpdateByte(_state, byte);
     }
   }
 }
+
+/// Advances a raw CRC-32 [state] by one [byte].
+int crc32UpdateByte(int state, int byte) => _crcTable[(state ^ byte) & 0xff] ^ (state >>> 8);
 
 /// Precomputed CRC-32 state transition table.
 final Uint32List _crcTable = Uint32List.fromList(<int>[

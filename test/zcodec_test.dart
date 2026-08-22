@@ -137,6 +137,140 @@ void main() {
       expect(utf8.decode(archive.find('manifest.json')!.data), '{}');
       expect(archive.find('raster/image.png')!.data, orderedEquals(<int>[1, 2, 3, 4, 5]));
     });
+
+    test('stream writer combines encrypted buffered entries and ZIP64 descriptors', () async {
+      final _CollectingSink output = _CollectingSink();
+      final ZipStreamWriter writer = ZipStreamWriter(
+        output,
+        passwordProvider: (name) => 'stream password',
+        randomBytes: Uint8List.new,
+        forceZip64: true,
+      );
+      writer.add(ZipEntry(name: 'secret.txt', data: utf8.encode('hidden'), encryption: ZipEncryption.aes192));
+      await writer.addStoredStream(
+        name: 'payload.bin',
+        data: Stream<List<int>>.value(<int>[1, 2, 3, 4]),
+        size: 4,
+      );
+      writer.close();
+      output.close();
+
+      final ZipArchive archive = ZipDecoder(passwordProvider: (name) => 'stream password').decode(output.takeBytes());
+      expect(utf8.decode(archive.find('secret.txt')!.data), 'hidden');
+      expect(archive.find('payload.bin')!.data, orderedEquals(<int>[1, 2, 3, 4]));
+    });
+
+    test('round-trips ZipCrypto and every WinZip AES key size', () {
+      for (final ZipEncryption encryption in ZipEncryption.values.skip(1)) {
+        final Uint8List encoded = encoder.encode(
+          ZipArchive(
+            entries: <ZipEntry>[
+              ZipEntry(name: '${encryption.name}.txt', data: utf8.encode('secret payload'), encryption: encryption),
+            ],
+          ),
+          passwordProvider: (name) => 'correct horse battery staple',
+          randomBytes: (length) => Uint8List.fromList(<int>[for (int index = 0; index < length; index++) index]),
+        );
+        final ZipArchive archive = ZipDecoder(passwordProvider: (name) => 'correct horse battery staple').decode(encoded);
+        expect(utf8.decode(archive.entries.single.data), 'secret payload');
+        expect(archive.entries.single.encryption, encryption);
+      }
+    });
+
+    test('rejects wrong passwords and modified AES ciphertext', () {
+      final Uint8List encoded = encoder.encode(
+        ZipArchive(
+          entries: <ZipEntry>[ZipEntry(name: 'secret.txt', data: utf8.encode('classified'), encryption: ZipEncryption.aes256)],
+        ),
+        passwordProvider: (name) => 'right',
+        randomBytes: Uint8List.new,
+      );
+      expect(
+        () => ZipDecoder(passwordProvider: (name) => 'wrong').decode(encoded).entries.single.data,
+        throwsA(isA<ZCodecException>()),
+      );
+      encoded[30 + 'secret.txt'.length + 11 + 18] ^= 1;
+      expect(
+        () => ZipDecoder(passwordProvider: (name) => 'right').decode(encoded).entries.single.data,
+        throwsA(isA<ZCodecException>()),
+      );
+    });
+
+    test('writes and reads forced ZIP64 records and entry extra fields', () {
+      final Uint8List encoded = encoder.encode(
+        ZipArchive(
+          entries: <ZipEntry>[
+            ZipEntry(name: 'large-metadata.bin', data: <int>[1, 2, 3]),
+          ],
+        ),
+        forceZip64: true,
+      );
+
+      expect(encoded, containsAllInOrder(<int>[0x50, 0x4b, 0x06, 0x06]));
+      final ZipArchive archive = decoder.decode(encoded);
+      expect(archive.entries.single.data, orderedEquals(<int>[1, 2, 3]));
+    });
+
+    test('writes and reads encrypted entries spanning split ZIP volumes', () {
+      final Uint8List large = Uint8List.fromList(<int>[for (int index = 0; index < 150000; index++) (index * 149 + index ~/ 251) & 0xff]);
+      final List<Uint8List> volumes = encoder.encodeVolumes(
+        ZipArchive(
+          comment: 'split archive',
+          entries: <ZipEntry>[
+            ZipEntry(
+              name: 'large.bin',
+              data: large,
+              compression: ZipCompression.store,
+              encryption: ZipEncryption.aes256,
+            ),
+            ZipEntry(name: 'tail.txt', data: utf8.encode('end'), encryption: ZipEncryption.zipCrypto),
+          ],
+        ),
+        volumeSize: 65536,
+        passwordProvider: (name) => 'volume password',
+        randomBytes: Uint8List.new,
+      );
+
+      expect(volumes.length, greaterThan(1));
+      expect(volumes.every((volume) => volume.length <= 65536), isTrue);
+      expect(volumes.first.take(4), orderedEquals(<int>[0x50, 0x4b, 0x07, 0x08]));
+      final ZipArchive archive = ZipDecoder(passwordProvider: (name) => 'volume password').decodeVolumes(volumes);
+      expect(archive.volumeCount, volumes.length);
+      expect(archive.comment, 'split archive');
+      expect(archive.find('large.bin')!.data, orderedEquals(large));
+      expect(utf8.decode(archive.find('tail.txt')!.data), 'end');
+    });
+
+    test('combines forced ZIP64 records with split volumes', () {
+      final Uint8List large = Uint8List.fromList(<int>[for (int index = 0; index < 70000; index++) index & 0xff]);
+      final List<Uint8List> volumes = encoder.encodeVolumes(
+        ZipArchive(
+          entries: <ZipEntry>[ZipEntry(name: 'zip64.bin', data: large, compression: ZipCompression.store)],
+        ),
+        volumeSize: 65536,
+        forceZip64: true,
+      );
+
+      expect(volumes.length, greaterThan(1));
+      expect(decoder.decodeVolumes(volumes).entries.single.data, orderedEquals(large));
+    });
+
+    test('reads a central directory distributed over several volumes', () {
+      final List<Uint8List> volumes = encoder.encodeVolumes(
+        ZipArchive(
+          entries: <ZipEntry>[
+            for (int index = 0; index < 2000; index++) ZipEntry(name: 'entry-$index', data: const <int>[], compression: ZipCompression.store),
+          ],
+        ),
+        volumeSize: 65536,
+      );
+
+      final ZipArchive archive = decoder.decodeVolumes(volumes);
+      expect(volumes.length, greaterThan(2));
+      expect(archive.entries.length, 2000);
+      expect(archive.find('entry-1999')!.data, isEmpty);
+      expect(() => decoder.decodeVolumes(volumes.sublist(1)), throwsA(isA<ZCodecException>()));
+    });
   });
 }
 
