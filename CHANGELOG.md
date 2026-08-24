@@ -1,5 +1,11 @@
 # 📰 ZCodec changelog
 
+## v0.1.2
+Released on August 24, 2026.
+
+* **FEAT**: Added support for TAR and GZIP formats. ([#96314a7](https://github.com/focale-editor/zcodec/commit/96314a7))
+* **CHORE**: Now ignoring some files for pub.dev. ([#9ee84d6](https://github.com/focale-editor/zcodec/commit/9ee84d6))
+
 ## v0.1.1
 Released on August 22, 2026.
 
