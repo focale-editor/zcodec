@@ -1,5 +1,10 @@
 # 📰 ZCodec changelog
 
+## v0.1.3
+Released on August 25, 2026.
+
+* **CHORE**: Renamed example main file. ([#6fe9fab](https://github.com/focale-editor/zcodec/commit/6fe9fab))
+
 ## v0.1.2
 Released on August 24, 2026.
 
