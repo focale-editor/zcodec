@@ -1,5 +1,10 @@
 # 📰 ZCodec changelog
 
+## v0.2.0
+Released on August 27, 2026.
+
+* **BREAKING REFACTOR**: Standardized codecs around `dart:convert` and restructured codebase. ([#9ab9071](https://github.com/focale-editor/zcodec/commit/9ab9071))
+
 ## v0.1.3
 Released on August 25, 2026.
 
