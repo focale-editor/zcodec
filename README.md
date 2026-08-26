@@ -1,4 +1,4 @@
-# ZCodec
+_# ZCodec
 
 ZCodec provides dependency-free, synchronous codecs for DEFLATE, zlib, GZIP, TAR, and ZIP data. Its compression engine and archive parsers are implemented entirely in Dart: they do not import `dart:io`, call a native zlib backend, or use FFI. The core API therefore works on the Dart VM and the Web.
 
@@ -16,14 +16,19 @@ final compressed = codec.encode(utf8.encode('Hello ZCodec'));
 final text = utf8.decode(codec.decode(compressed));
 ```
 
+Conversion options belong to the codec, so a configured codec is a value you can store and reuse:
+
+```dart
+const fast = DeflateCodec(level: 1);
+const bounded = ZlibCodec(maxOutputBytes: 64 * 1024 * 1024);
+```
+
 Decode a `.tar.gz` file such as a source release:
 
 ```dart
-final tarBytes = const GzipCodec().decode(
-  tarGzipBytes,
-  maxOutputBytes: 512 * 1024 * 1024,
-);
-final tar = const TarDecoder().decode(tarBytes);
+final tar = const TarCodec()
+    .fuse(const GzipCodec(maxOutputBytes: 512 * 1024 * 1024))
+    .decode(tarGzipBytes);
 
 for (final entry in tar.entries) {
   if (!entry.hasSafePath || !entry.hasSafeLinkTarget) {
@@ -36,24 +41,23 @@ for (final entry in tar.entries) {
 Create a compressed TAR archive:
 
 ```dart
-final tarBytes = const TarEncoder().encode(
-  TarArchive(
-    entries: [
-      TarEntry(name: 'src/', type: TarEntryType.directory),
-      TarEntry(name: 'src/main.dart', data: sourceBytes),
-    ],
-  ),
-);
-final tarGzipBytes = const GzipCodec().encode(
-  tarBytes,
-  name: 'sources.tar',
-);
+final tarGzipBytes = const TarCodec()
+    .fuse(const GzipCodec(header: GzipHeader(name: 'sources.tar')))
+    .encode(
+      TarArchive(
+        entries: [
+          TarEntry(name: 'src/', type: TarEntryType.directory),
+          TarEntry(name: 'src/main.dart', data: sourceBytes),
+        ],
+      ),
+    );
 ```
 
 Build and read a ZIP archive:
 
 ```dart
-final bytes = const ZipEncoder().encode(
+const zip = ZipCodec();
+final bytes = zip.encode(
   ZipArchive(
     entries: [
       ZipEntry(name: 'manifest.json', data: utf8.encode('{}')),
@@ -66,14 +70,15 @@ final bytes = const ZipEncoder().encode(
   ),
 );
 
-final archive = const ZipDecoder().decode(bytes);
+final archive = zip.decode(bytes);
 final manifest = archive.find('manifest.json')?.data;
 ```
 
 Encrypt individual entries with traditional ZipCrypto or WinZip AES AE-2:
 
 ```dart
-final encrypted = const ZipEncoder().encode(
+final codec = ZipCodec(passwordProvider: (name) => passwords[name]);
+final encrypted = codec.encode(
   ZipArchive(
     entries: [
       ZipEntry(
@@ -83,30 +88,35 @@ final encrypted = const ZipEncoder().encode(
       ),
     ],
   ),
-  passwordProvider: (name) => passwords[name],
 );
 
-final decrypted = ZipDecoder(
-  passwordProvider: (name) => passwords[name],
-).decode(encrypted);
+final decrypted = codec.decode(encrypted);
 ```
 
 Create and decode split ZIP archives:
 
 ```dart
-final volumes = const ZipEncoder().encodeVolumes(
+final volumes = const ZipCodec().encodeVolumes(
   archive,
   volumeSize: 4 * 1024 * 1024,
 );
 
 // Persist all but the last volume as .z01, .z02, ... and the last as .zip.
-final decoded = const ZipDecoder().decodeVolumes(volumes);
+final decoded = const ZipCodec().decodeVolumes(volumes);
 ```
 
 ZIP64 records are selected automatically when a count, size, offset, or disk
-number reaches its classic ZIP limit. Pass `forceZip64: true` to either
-`ZipEncoder.encode`, `ZipEncoder.encodeVolumes`, or `ZipStreamWriter` to emit
-ZIP64 records for a small archive, which is useful for testing integrations.
+number reaches its classic ZIP limit. Pass `forceZip64: true` to `ZipCodec`,
+`ZipEncoder`, or `ZipStreamWriter` to emit ZIP64 records for a small archive,
+which is useful for testing integrations.
+
+Keep GZIP member metadata by decoding with `GzipMemberCodec`, which maps a
+GZIP file to and from its list of members:
+
+```dart
+final members = const GzipMemberCodec().decode(gzipBytes);
+print(members.first.name);
+```
 
 Stream large, already-compressed entries to any Dart byte sink:
 
@@ -125,6 +135,19 @@ writer.close();
 
 ZIP entries decoded from an archive are inflated lazily. Call `ZipEntry.release()` after consuming a large entry, or `ZipArchive.release()` for all entries, to allow the decoded buffers to be reclaimed while retaining the original archive bytes.
 
+## Codec structure
+
+| Codec             | Decoded form       | Encoded form        |
+|-------------------|--------------------|---------------------|
+| `DeflateCodec`    | `List<int>`        | raw RFC 1951 stream |
+| `ZlibCodec`       | `List<int>`        | RFC 1950 stream     |
+| `GzipCodec`       | `List<int>`        | RFC 1952 file       |
+| `GzipMemberCodec` | `List<GzipMember>` | RFC 1952 file       |
+| `TarCodec`        | `TarArchive`       | TAR archive         |
+| `ZipCodec`        | `ZipArchive`       | ZIP archive         |
+
+All of them extend `BinaryCodec<S>`, a `Codec<S, List<int>>` whose encoded side is always bytes. The byte-to-byte compressors additionally share `ByteCodec`. Converters are constant values, so `codec.encoder` and `codec.decoder` can be passed to `Stream.transform`; because a container format is only complete once its last byte is known, the chunked converters buffer their input and emit one result on close.
+
 ## Safety and format support
 
 - DEFLATE decoding supports stored, fixed-Huffman, and dynamic-Huffman blocks.
@@ -139,4 +162,4 @@ ZIP entries decoded from an archive are inflated lazily. Call `ZipEntry.release(
 - `TarEntry.hasSafePath`, `TarEntry.hasSafeLinkTarget`, and `ZipEntry.hasSafePath` must be checked before extracting an entry to disk.
 - Proprietary PKWARE Strong Encryption is detected and rejected explicitly; it is distinct from WinZip AES and requires separately licensed PKWARE technology.
 
-All compression, archive parsing, checksums, ZipCrypto, AES, SHA-1, HMAC, and PBKDF2 code is implemented in Dart. ZCodec uses only Dart SDK libraries and has no runtime package dependencies.
+All compression, archive parsing, checksums, ZipCrypto, AES, SHA-1, HMAC, and PBKDF2 code is implemented in Dart. ZCodec uses only Dart SDK libraries and has no runtime package dependencies._

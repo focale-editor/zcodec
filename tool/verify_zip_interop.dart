@@ -14,36 +14,28 @@ Future<void> main() async {
         ZipEntry(name: 'payload.bin', data: payload, compression: ZipCompression.store, encryption: ZipEncryption.aes256),
       ],
     );
+    final ZipCodec encrypted = ZipCodec(passwordProvider: (name) => 'secret', randomBytes: Uint8List.new);
     final File aes = File('${temporary.path}/aes.zip');
-    await aes.writeAsBytes(
-      const ZipEncoder().encode(source, passwordProvider: (name) => 'secret', randomBytes: Uint8List.new),
-    );
+    await aes.writeAsBytes(encrypted.encode(source));
     await _run7Zip(<String>['t', '-psecret', aes.path]);
 
     final File zipCrypto = File('${temporary.path}/zipcrypto.zip');
     await zipCrypto.writeAsBytes(
-      const ZipEncoder().encode(
+      encrypted.encode(
         ZipArchive(
           entries: <ZipEntry>[
             ZipEntry(name: 'payload.bin', data: payload, compression: ZipCompression.store, encryption: ZipEncryption.zipCrypto),
           ],
         ),
-        passwordProvider: (name) => 'secret',
-        randomBytes: Uint8List.new,
       ),
     );
     await _run7Zip(<String>['t', '-psecret', zipCrypto.path]);
 
     final File zip64 = File('${temporary.path}/zip64.zip');
-    await zip64.writeAsBytes(const ZipEncoder().encode(source, passwordProvider: (name) => 'secret', forceZip64: true));
+    await zip64.writeAsBytes(ZipCodec(passwordProvider: (name) => 'secret', forceZip64: true).encode(source));
     await _run7Zip(<String>['t', '-psecret', zip64.path]);
 
-    final List<Uint8List> volumes = const ZipEncoder().encodeVolumes(
-      source,
-      volumeSize: 65536,
-      passwordProvider: (name) => 'secret',
-      randomBytes: Uint8List.new,
-    );
+    final List<Uint8List> volumes = encrypted.encodeVolumes(source, volumeSize: 65536);
     await _writeSplitVolumes(temporary, 'split', volumes);
     await _run7Zip(<String>['t', '-psecret', '${temporary.path}/split.zip']);
 
@@ -66,14 +58,14 @@ Future<void> main() async {
     await input.writeAsString('7-Zip interoperability');
     final File externalAes = File('${temporary.path}/external-aes.zip');
     await _run7Zip(<String>['a', '-tzip', '-psecret', '-mem=AES256', externalAes.path, input.path]);
-    final ZipArchive decodedAes = ZipDecoder(passwordProvider: (name) => 'secret').decode(await externalAes.readAsBytes());
+    final ZipArchive decodedAes = encrypted.decode(await externalAes.readAsBytes());
     if (utf8.decode(decodedAes.entries.single.data) != '7-Zip interoperability') {
       throw StateError('ZCodec did not decode the 7-Zip AES archive correctly');
     }
 
     final File externalZipCrypto = File('${temporary.path}/external-zipcrypto.zip');
     await _run7Zip(<String>['a', '-tzip', '-psecret', '-mem=ZipCrypto', externalZipCrypto.path, input.path]);
-    final ZipArchive decodedZipCrypto = ZipDecoder(passwordProvider: (name) => 'secret').decode(await externalZipCrypto.readAsBytes());
+    final ZipArchive decodedZipCrypto = encrypted.decode(await externalZipCrypto.readAsBytes());
     if (utf8.decode(decodedZipCrypto.entries.single.data) != '7-Zip interoperability') {
       throw StateError('ZCodec did not decode the 7-Zip ZipCrypto archive correctly');
     }

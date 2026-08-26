@@ -165,8 +165,10 @@ final class ZipEntry {
     final Uint8List payload = Uint8List.sublistView(archive, _dataOffset, _dataOffset + compressedSize);
     final Uint8List compressed = _decrypt(payload);
     final Uint8List decoded = switch (compression) {
-      ZipCompression.store => Uint8List.fromList(compressed),
-      ZipCompression.deflate => const DeflateCodec().decode(compressed, maxOutputBytes: _maximumOutputBytes),
+      // Decryption and inflation both allocate, so only a plain stored entry
+      // still aliases the archive buffer and has to be copied.
+      ZipCompression.store => encryption == ZipEncryption.none ? Uint8List.fromList(compressed) : compressed,
+      ZipCompression.deflate => DeflateDecoder(maxOutputBytes: _maximumOutputBytes).convert(compressed),
     };
     if (decoded.length != uncompressedSize) {
       throw ZCodecException('ZIP entry "$name" has ${decoded.length} bytes; expected $uncompressedSize');
@@ -202,14 +204,14 @@ final class ZipEntry {
       if (payload.length < 12) {
         throw ZCodecException('ZIP entry "$name" has a truncated encryption header');
       }
-      final ZipCryptoCipher cipher = ZipCryptoCipher(password);
+      final _ZipCryptoCipher cipher = _ZipCryptoCipher(password);
       final Uint8List header = cipher.decrypt(Uint8List.sublistView(payload, 0, 12));
       if (header[11] != _passwordCheckByte) {
         throw ZCodecException('Incorrect password for ZIP entry "$name"');
       }
       return cipher.decrypt(Uint8List.sublistView(payload, 12));
     }
-    return decryptWinZipAes(payload: payload, password: password, keyLength: _aesKeyLength(encryption));
+    return _decryptWinZipAes(payload: payload, password: password, keyLength: _aesKeyLength(encryption));
   }
 }
 
@@ -224,20 +226,18 @@ final class ZipArchive {
   /// Number of physical ZIP volumes represented by this archive.
   final int volumeCount;
 
+  /// Lookup from entry name to its first occurrence, built on demand.
+  Map<String, ZipEntry>? _index;
+
   /// Creates an archive from [entries].
   ZipArchive({Iterable<ZipEntry> entries = const <ZipEntry>[], this.comment = '', this.volumeCount = 1})
     : assert(volumeCount > 0, 'volumeCount must be positive'),
       entries = List<ZipEntry>.unmodifiable(entries);
 
   /// Finds the first entry whose path equals [name].
-  ZipEntry? find(String name) {
-    for (final ZipEntry entry in entries) {
-      if (entry.name == name) {
-        return entry;
-      }
-    }
-    return null;
-  }
+  ZipEntry? find(String name) => (_index ??= <String, ZipEntry>{
+    for (final ZipEntry entry in entries.reversed) entry.name: entry,
+  })[name];
 
   /// Releases materialized data for all lazily decoded entries.
   void release() {

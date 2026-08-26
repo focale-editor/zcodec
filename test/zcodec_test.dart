@@ -17,20 +17,31 @@ void main() {
       ];
       for (int level = 0; level <= 9; level++) {
         for (final Uint8List value in values) {
-          expect(codec.decode(codec.encode(value, level: level)), orderedEquals(value));
+          expect(codec.decode(DeflateCodec(level: level).encode(value)), orderedEquals(value));
         }
       }
     });
 
     test('splits stored data larger than one DEFLATE block', () {
       final Uint8List value = Uint8List.fromList(<int>[for (int index = 0; index < 70000; index++) index & 0xff]);
-      expect(codec.decode(codec.encode(value, level: 0)), orderedEquals(value));
+      expect(codec.decode(const DeflateCodec(level: 0).encode(value)), orderedEquals(value));
     });
 
-    test('rejects trailing bytes and output beyond a limit', () {
+    test('rejects trailing bytes, invalid levels, and output beyond a limit', () {
       final Uint8List encoded = codec.encode(utf8.encode('bounded output'));
       expect(() => codec.decode(<int>[...encoded, 0]), throwsA(isA<ZCodecException>()));
-      expect(() => codec.decode(encoded, maxOutputBytes: 4), throwsA(isA<ZCodecException>()));
+      expect(() => const DeflateCodec(maxOutputBytes: 4).decode(encoded), throwsA(isA<ZCodecException>()));
+      expect(() => const DeflateCodec(level: 10).encode(const <int>[1]), throwsA(isA<RangeError>()));
+    });
+
+    test('behaves as a dart:convert codec', () async {
+      final Uint8List value = Uint8List.fromList(utf8.encode('converter contract' * 50));
+      expect(codec.decoder.convert(codec.encoder.convert(value)), orderedEquals(value));
+      final List<List<int>> chunks = await Stream<List<int>>.fromIterable(<List<int>>[
+        value.sublist(0, 100),
+        value.sublist(100),
+      ]).transform(codec.encoder).transform(codec.decoder).toList();
+      expect(chunks.single, orderedEquals(value));
     });
   });
 
@@ -53,7 +64,7 @@ void main() {
       final Uint8List encoded = codec.encode(utf8.encode('checksum'));
       encoded[encoded.length - 1] ^= 1;
       expect(() => codec.decode(encoded), throwsA(isA<ZCodecException>()));
-      expect(() => codec.decode(codec.encode(utf8.encode('too large')), maxOutputBytes: 2), throwsA(isA<ZCodecException>()));
+      expect(() => const ZlibCodec(maxOutputBytes: 2).decode(codec.encode(utf8.encode('too large'))), throwsA(isA<ZCodecException>()));
     });
   });
 
@@ -69,21 +80,24 @@ void main() {
 
     test('round-trips concatenated members and optional metadata', () {
       final DateTime modified = DateTime.utc(2026, 8, 22, 12, 34, 56);
-      final Uint8List encoded = codec.encodeMembers(<GzipMember>[
+      const GzipMemberCodec memberCodec = GzipMemberCodec();
+      final Uint8List encoded = memberCodec.encode(<GzipMember>[
         GzipMember(
           data: utf8.encode('first'),
-          modified: modified,
-          name: 'café.txt',
-          comment: 'métadonnées',
-          extra: <int>[1, 2, 3],
-          operatingSystem: 3,
-          isText: true,
-          headerChecksum: true,
+          header: GzipHeader(
+            modified: modified,
+            name: 'café.txt',
+            comment: 'métadonnées',
+            extra: const <int>[1, 2, 3],
+            operatingSystem: 3,
+            isText: true,
+            headerChecksum: true,
+          ),
         ),
         GzipMember(data: utf8.encode('second')),
       ]);
 
-      final List<GzipMember> members = codec.decodeMembers(encoded);
+      final List<GzipMember> members = memberCodec.decode(encoded);
       expect(members.length, 2);
       expect(utf8.decode(codec.decode(encoded)), 'firstsecond');
       expect(members.first.modified, modified);
@@ -99,18 +113,25 @@ void main() {
       final Uint8List damaged = codec.encode(utf8.encode('checksum'));
       damaged[damaged.length - 8] ^= 1;
       expect(() => codec.decode(damaged), throwsA(isA<ZCodecException>()));
-      expect(() => codec.decode(codec.encode(Uint8List(32)), maxOutputBytes: 16), throwsA(isA<ZCodecException>()));
-      final Uint8List concatenated = codec.encodeMembers(<GzipMember>[
+      expect(() => const GzipCodec(maxOutputBytes: 16).decode(codec.encode(Uint8List(32))), throwsA(isA<ZCodecException>()));
+      final Uint8List concatenated = const GzipMemberCodec().encode(<GzipMember>[
         GzipMember(data: const <int>[1]),
         GzipMember(data: const <int>[2]),
       ]);
-      expect(() => codec.decode(concatenated, maxMembers: 1), throwsA(isA<ZCodecException>()));
+      expect(() => const GzipCodec(maxMembers: 1).decode(concatenated), throwsA(isA<ZCodecException>()));
+    });
+
+    test('writes header metadata through the codec configuration', () {
+      const GzipCodec named = GzipCodec(header: GzipHeader(name: 'payload.bin', isText: true));
+      final GzipMember member = const GzipMemberCodec().decode(named.encode(utf8.encode('data'))).single;
+      expect(member.name, 'payload.bin');
+      expect(member.isText, isTrue);
+      expect(utf8.decode(member.data), 'data');
     });
   });
 
   group('TAR', () {
-    const TarEncoder encoder = TarEncoder();
-    const TarDecoder decoder = TarDecoder();
+    const TarCodec codec = TarCodec();
 
     test('round-trips ustar, links, and PAX metadata', () {
       final String longName = '${'nested/' * 40}payload.txt';
@@ -133,8 +154,8 @@ void main() {
         ],
       );
 
-      final Uint8List encoded = encoder.encode(source);
-      final TarArchive archive = decoder.decode(encoded);
+      final Uint8List encoded = codec.encode(source);
+      final TarArchive archive = codec.decode(encoded);
       expect(encoded.length % 512, 0);
       expect(archive.entries.length, 3);
       expect(archive.find('directory/')!.isDirectory, isTrue);
@@ -148,7 +169,7 @@ void main() {
     });
 
     test('validates checksums, limits, and extraction paths', () {
-      final Uint8List damaged = encoder.encode(
+      final Uint8List damaged = codec.encode(
         TarArchive(
           entries: <TarEntry>[
             TarEntry(name: 'file', data: const <int>[1, 2, 3]),
@@ -156,32 +177,74 @@ void main() {
         ),
       );
       damaged[0] ^= 1;
-      expect(() => decoder.decode(damaged), throwsA(isA<ZCodecException>()));
-      final Uint8List encoded = encoder.encode(
+      expect(() => codec.decode(damaged), throwsA(isA<ZCodecException>()));
+      final Uint8List encoded = codec.encode(
         TarArchive(
           entries: <TarEntry>[TarEntry(name: 'file', data: Uint8List(32))],
         ),
       );
-      expect(() => const TarDecoder(limits: TarLimits(maxEntryBytes: 16)).decode(encoded), throwsA(isA<ZCodecException>()));
+      expect(() => const TarCodec(limits: TarLimits(maxEntryBytes: 16)).decode(encoded), throwsA(isA<ZCodecException>()));
       expect(TarEntry(name: '../outside', data: const <int>[]).hasSafePath, isFalse);
       expect(TarEntry(name: 'inside/file', data: const <int>[]).hasSafePath, isTrue);
       expect(TarEntry(name: 'link', type: TarEntryType.symbolicLink, linkName: '../outside').hasSafeLinkTarget, isFalse);
     });
 
+    test('writes pre-epoch timestamps as GNU base-256 numbers', () {
+      final DateTime modified = DateTime.utc(1900, 6, 15, 8, 30);
+      final Uint8List encoded = codec.encode(
+        TarArchive(
+          entries: <TarEntry>[
+            TarEntry(name: 'ancient', data: const <int>[1, 2, 3], modified: modified),
+          ],
+        ),
+      );
+      // The mtime field itself must carry the value, not only its PAX override.
+      expect(encoded[136] & 0x80, 0x80);
+      expect(codec.decode(encoded).entries.single.modified, modified);
+    });
+
+    test('reads the nanosecond PAX timestamps written by GNU tar', () {
+      // Parsing such a record as a double rounds it up to the next microsecond.
+      final Uint8List encoded = _paxTarArchive('precise', 'mtime=1787402096.123456789\n');
+      final TarArchive archive = const TarCodec(verifyChecksum: false).decode(encoded);
+      expect(archive.entries.single.modified, DateTime.fromMicrosecondsSinceEpoch(1787402096123456, isUtc: true));
+    });
+
+    test('ignores the GNU time fields that overlap the ustar prefix', () {
+      final BytesBuilder output = BytesBuilder();
+      final Uint8List header = _tarHeaderBlock('gnu.txt', 0, 0x30, gnu: true)
+        // GNU tar stores atime and ctime where ustar stores its path prefix.
+        ..setRange(345, 356, ascii.encode('14766646262'))
+        ..setRange(357, 368, ascii.encode('14766646262'));
+      output
+        ..add(header)
+        ..add(Uint8List(1024));
+      final TarArchive archive = const TarCodec(verifyChecksum: false).decode(output.takeBytes());
+      expect(archive.entries.single.name, 'gnu.txt');
+    });
+
+    test('behaves as a dart:convert codec', () {
+      final TarArchive source = TarArchive(
+        entries: <TarEntry>[TarEntry(name: 'hello.txt', data: utf8.encode('hello'))],
+      );
+      final Codec<TarArchive, List<int>> tarGzip = codec.fuse(const GzipCodec());
+      expect(utf8.decode(tarGzip.decode(tarGzip.encode(source)).find('hello.txt')!.data), 'hello');
+      expect(codec.decoder.convert(codec.encoder.convert(source)).entries.single.name, 'hello.txt');
+    });
+
     test('preserves negative fractional PAX timestamps', () {
       final DateTime modified = DateTime.fromMicrosecondsSinceEpoch(-500000, isUtc: true);
-      final Uint8List encoded = encoder.encode(
+      final Uint8List encoded = codec.encode(
         TarArchive(
           entries: <TarEntry>[TarEntry(name: 'historic', modified: modified)],
         ),
       );
-      expect(decoder.decode(encoded).entries.single.modified, modified);
+      expect(codec.decode(encoded).entries.single.modified, modified);
     });
   });
 
   group('ZIP', () {
-    const ZipEncoder encoder = ZipEncoder();
-    const ZipDecoder decoder = ZipDecoder();
+    const ZipCodec codec = ZipCodec();
 
     test('round-trips stored and compressed entries with metadata', () {
       final DateTime modified = DateTime(2026, 8, 22, 12, 34, 56);
@@ -192,7 +255,7 @@ void main() {
           ZipEntry(name: 'raster/image.png', data: <int>[137, 80, 78, 71], compression: ZipCompression.store, modified: modified),
         ],
       );
-      final ZipArchive decoded = decoder.decode(encoder.encode(source));
+      final ZipArchive decoded = codec.decode(codec.encode(source));
       expect(decoded.comment, 'projet');
       expect(decoded.entries.map((entry) => entry.name), <String>['manifest.json', 'raster/image.png']);
       expect(utf8.decode(decoded.find('manifest.json')!.data), '{"format":"focale"}');
@@ -205,14 +268,14 @@ void main() {
       final Uint8List fixture = base64.decode(
         'UEsDBBQAAAAIAFWoFl1INYmoFQAAABMAAAANAAAAbWFuaWZlc3QuanNvbqtWSssvyk0sUbJSSstPTsxJVaoFAFBLAwQUAAAICABVqBZdtUKtmAcAAAAFAAAAEAAAAHJhc3Rlci9jYWbDqS50eHRLTkw7vBIAUEsBAhQDFAAAAAgAVagWXUg1iagVAAAAEwAAAA0AAAAAAAAAAAAAAIABAAAAAG1hbmlmZXN0Lmpzb25QSwECFAMUAAAICABVqBZdtUKtmAcAAAAFAAAAEAAAAAAAAAAAAAAAgAFAAAAAcmFzdGVyL2NhZsOpLnR4dFBLBQYAAAAAAgACAHkAAAB1AAAABwBmaXh0dXJl',
       );
-      final ZipArchive archive = decoder.decode(fixture);
+      final ZipArchive archive = codec.decode(fixture);
       expect(archive.comment, 'fixture');
       expect(utf8.decode(archive.find('manifest.json')!.data), '{"format":"focale"}');
       expect(utf8.decode(archive.find('raster/café.txt')!.data), 'café');
     });
 
     test('detects a damaged stored entry when its data is requested', () {
-      final Uint8List encoded = encoder.encode(
+      final Uint8List encoded = codec.encode(
         ZipArchive(
           entries: <ZipEntry>[
             ZipEntry(name: 'x', data: <int>[1, 2, 3], compression: ZipCompression.store),
@@ -220,18 +283,29 @@ void main() {
         ),
       );
       encoded[31] ^= 1;
-      final ZipEntry entry = decoder.decode(encoded).entries.single;
+      final ZipEntry entry = codec.decode(encoded).entries.single;
       expect(() => entry.data, throwsA(isA<ZCodecException>()));
     });
 
     test('enforces central-directory limits before inflation', () {
-      final Uint8List encoded = encoder.encode(
+      final Uint8List encoded = codec.encode(
         ZipArchive(
           entries: <ZipEntry>[ZipEntry(name: 'large', data: Uint8List(32))],
         ),
       );
-      expect(() => const ZipDecoder(limits: ZipLimits(maxEntryBytes: 16)).decode(encoded), throwsA(isA<ZCodecException>()));
-      expect(() => const ZipDecoder(limits: ZipLimits(maxEntries: 0)).decode(encoded), throwsA(isA<ZCodecException>()));
+      expect(() => const ZipCodec(limits: ZipLimits(maxEntryBytes: 16)).decode(encoded), throwsA(isA<ZCodecException>()));
+      expect(() => const ZipCodec(limits: ZipLimits(maxEntries: 0)).decode(encoded), throwsA(isA<ZCodecException>()));
+    });
+
+    test('behaves as a dart:convert codec', () async {
+      final ZipArchive source = ZipArchive(
+        entries: <ZipEntry>[ZipEntry(name: 'hello.txt', data: utf8.encode('hello'))],
+      );
+      expect(codec.decoder.convert(codec.encoder.convert(source)).find('hello.txt'), isNotNull);
+      final List<ZipArchive> decoded = await Stream<List<int>>.fromIterable(<List<int>>[
+        codec.encode(source),
+      ]).transform(codec.decoder).toList();
+      expect(utf8.decode(decoded.single.find('hello.txt')!.data), 'hello');
     });
 
     test('identifies paths unsafe for direct extraction', () {
@@ -254,7 +328,7 @@ void main() {
       writer.close(comment: 'streamed');
       output.close();
 
-      final ZipArchive archive = decoder.decode(output.takeBytes());
+      final ZipArchive archive = codec.decode(output.takeBytes());
       expect(archive.comment, 'streamed');
       expect(utf8.decode(archive.find('manifest.json')!.data), '{}');
       expect(archive.find('raster/image.png')!.data, orderedEquals(<int>[1, 2, 3, 4, 5]));
@@ -277,65 +351,65 @@ void main() {
       writer.close();
       output.close();
 
-      final ZipArchive archive = ZipDecoder(passwordProvider: (name) => 'stream password').decode(output.takeBytes());
+      final ZipArchive archive = ZipCodec(passwordProvider: (name) => 'stream password').decode(output.takeBytes());
       expect(utf8.decode(archive.find('secret.txt')!.data), 'hidden');
       expect(archive.find('payload.bin')!.data, orderedEquals(<int>[1, 2, 3, 4]));
     });
 
     test('round-trips ZipCrypto and every WinZip AES key size', () {
       for (final ZipEncryption encryption in ZipEncryption.values.skip(1)) {
-        final Uint8List encoded = encoder.encode(
+        final ZipCodec encrypted = ZipCodec(
+          passwordProvider: (name) => 'correct horse battery staple',
+          randomBytes: (length) => Uint8List.fromList(<int>[for (int index = 0; index < length; index++) index]),
+        );
+        final Uint8List encoded = encrypted.encode(
           ZipArchive(
             entries: <ZipEntry>[
               ZipEntry(name: '${encryption.name}.txt', data: utf8.encode('secret payload'), encryption: encryption),
             ],
           ),
-          passwordProvider: (name) => 'correct horse battery staple',
-          randomBytes: (length) => Uint8List.fromList(<int>[for (int index = 0; index < length; index++) index]),
         );
-        final ZipArchive archive = ZipDecoder(passwordProvider: (name) => 'correct horse battery staple').decode(encoded);
+        final ZipArchive archive = encrypted.decode(encoded);
         expect(utf8.decode(archive.entries.single.data), 'secret payload');
         expect(archive.entries.single.encryption, encryption);
       }
     });
 
     test('rejects wrong passwords and modified AES ciphertext', () {
-      final Uint8List encoded = encoder.encode(
+      final Uint8List encoded = ZipCodec(passwordProvider: (name) => 'right', randomBytes: Uint8List.new).encode(
         ZipArchive(
           entries: <ZipEntry>[ZipEntry(name: 'secret.txt', data: utf8.encode('classified'), encryption: ZipEncryption.aes256)],
         ),
-        passwordProvider: (name) => 'right',
-        randomBytes: Uint8List.new,
       );
       expect(
-        () => ZipDecoder(passwordProvider: (name) => 'wrong').decode(encoded).entries.single.data,
+        () => ZipCodec(passwordProvider: (name) => 'wrong').decode(encoded).entries.single.data,
         throwsA(isA<ZCodecException>()),
       );
       encoded[30 + 'secret.txt'.length + 11 + 18] ^= 1;
       expect(
-        () => ZipDecoder(passwordProvider: (name) => 'right').decode(encoded).entries.single.data,
+        () => ZipCodec(passwordProvider: (name) => 'right').decode(encoded).entries.single.data,
         throwsA(isA<ZCodecException>()),
       );
     });
 
     test('writes and reads forced ZIP64 records and entry extra fields', () {
-      final Uint8List encoded = encoder.encode(
+      final Uint8List encoded = const ZipCodec(forceZip64: true).encode(
         ZipArchive(
           entries: <ZipEntry>[
             ZipEntry(name: 'large-metadata.bin', data: <int>[1, 2, 3]),
           ],
         ),
-        forceZip64: true,
       );
 
       expect(encoded, containsAllInOrder(<int>[0x50, 0x4b, 0x06, 0x06]));
-      final ZipArchive archive = decoder.decode(encoded);
+      final ZipArchive archive = codec.decode(encoded);
       expect(archive.entries.single.data, orderedEquals(<int>[1, 2, 3]));
     });
 
     test('writes and reads encrypted entries spanning split ZIP volumes', () {
       final Uint8List large = Uint8List.fromList(<int>[for (int index = 0; index < 150000; index++) (index * 149 + index ~/ 251) & 0xff]);
-      final List<Uint8List> volumes = encoder.encodeVolumes(
+      final ZipCodec encrypted = ZipCodec(passwordProvider: (name) => 'volume password', randomBytes: Uint8List.new);
+      final List<Uint8List> volumes = encrypted.encodeVolumes(
         ZipArchive(
           comment: 'split archive',
           entries: <ZipEntry>[
@@ -349,14 +423,12 @@ void main() {
           ],
         ),
         volumeSize: 65536,
-        passwordProvider: (name) => 'volume password',
-        randomBytes: Uint8List.new,
       );
 
       expect(volumes.length, greaterThan(1));
       expect(volumes.every((volume) => volume.length <= 65536), isTrue);
       expect(volumes.first.take(4), orderedEquals(<int>[0x50, 0x4b, 0x07, 0x08]));
-      final ZipArchive archive = ZipDecoder(passwordProvider: (name) => 'volume password').decodeVolumes(volumes);
+      final ZipArchive archive = encrypted.decodeVolumes(volumes);
       expect(archive.volumeCount, volumes.length);
       expect(archive.comment, 'split archive');
       expect(archive.find('large.bin')!.data, orderedEquals(large));
@@ -365,20 +437,19 @@ void main() {
 
     test('combines forced ZIP64 records with split volumes', () {
       final Uint8List large = Uint8List.fromList(<int>[for (int index = 0; index < 70000; index++) index & 0xff]);
-      final List<Uint8List> volumes = encoder.encodeVolumes(
+      final List<Uint8List> volumes = const ZipCodec(forceZip64: true).encodeVolumes(
         ZipArchive(
           entries: <ZipEntry>[ZipEntry(name: 'zip64.bin', data: large, compression: ZipCompression.store)],
         ),
         volumeSize: 65536,
-        forceZip64: true,
       );
 
       expect(volumes.length, greaterThan(1));
-      expect(decoder.decodeVolumes(volumes).entries.single.data, orderedEquals(large));
+      expect(codec.decodeVolumes(volumes).entries.single.data, orderedEquals(large));
     });
 
     test('reads a central directory distributed over several volumes', () {
-      final List<Uint8List> volumes = encoder.encodeVolumes(
+      final List<Uint8List> volumes = codec.encodeVolumes(
         ZipArchive(
           entries: <ZipEntry>[
             for (int index = 0; index < 2000; index++) ZipEntry(name: 'entry-$index', data: const <int>[], compression: ZipCompression.store),
@@ -387,11 +458,11 @@ void main() {
         volumeSize: 65536,
       );
 
-      final ZipArchive archive = decoder.decodeVolumes(volumes);
+      final ZipArchive archive = codec.decodeVolumes(volumes);
       expect(volumes.length, greaterThan(2));
       expect(archive.entries.length, 2000);
       expect(archive.find('entry-1999')!.data, isEmpty);
-      expect(() => decoder.decodeVolumes(volumes.sublist(1)), throwsA(isA<ZCodecException>()));
+      expect(() => codec.decodeVolumes(volumes.sublist(1)), throwsA(isA<ZCodecException>()));
     });
   });
 }
@@ -414,4 +485,30 @@ final class _CollectingSink implements Sink<List<int>> {
 
   /// Returns all chunks as one byte buffer.
   Uint8List takeBytes() => _bytes.takeBytes();
+}
+
+/// Builds a two-entry TAR archive whose first entry is a PAX metadata block.
+///
+/// Header checksums are left blank, so the archive must be decoded with
+/// `verifyChecksum: false`.
+Uint8List _paxTarArchive(String name, String record) {
+  final Uint8List payload = Uint8List.fromList(utf8.encode('${record.length + 3} $record'));
+  final BytesBuilder output = BytesBuilder();
+  output
+    ..add(_tarHeaderBlock('PaxHeaders/$name', payload.length, 0x78))
+    ..add(payload)
+    ..add(Uint8List(512 - payload.length % 512))
+    ..add(_tarHeaderBlock(name, 0, 0x30))
+    ..add(Uint8List(1024));
+  return output.takeBytes();
+}
+
+/// Builds one 512-byte header block, in POSIX ustar or GNU format.
+Uint8List _tarHeaderBlock(String name, int size, int typeFlag, {bool gnu = false}) {
+  final Uint8List block = Uint8List(512)
+    ..setRange(0, name.length, utf8.encode(name))
+    ..setRange(124, 135, ascii.encode(size.toRadixString(8).padLeft(11, '0')))
+    ..setRange(257, 265, gnu ? <int>[0x75, 0x73, 0x74, 0x61, 0x72, 0x20, 0x20, 0] : <int>[0x75, 0x73, 0x74, 0x61, 0x72, 0, 0x30, 0x30]);
+  block[156] = typeFlag;
+  return block;
 }

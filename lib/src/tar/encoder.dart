@@ -1,17 +1,22 @@
-part of '../tar.dart';
+part of 'package:zcodec/src/tar.dart';
 
 /// Serializes POSIX ustar archives with automatic PAX extensions.
-final class TarEncoder {
+///
+/// A PAX metadata entry is emitted only for the fields that do not fit the
+/// classic ustar header, so archives stay readable by plain ustar tools
+/// whenever possible.
+final class TarEncoder extends BinaryEncoder<TarArchive> {
   /// Creates a stateless TAR encoder.
   const TarEncoder();
 
-  /// Encodes [archive] and terminates it with two zero blocks.
-  Uint8List encode(TarArchive archive) {
+  /// Encodes [input] and terminates it with two zero blocks.
+  @override
+  Uint8List convert(TarArchive input) {
     final ByteWriter output = ByteWriter();
-    for (final TarEntry entry in archive.entries) {
+    for (final TarEntry entry in input.entries) {
       _encodeEntry(output, entry);
     }
-    output.writeBytes(Uint8List(_tarBlockSize * 2));
+    output.writeZeroes(_tarBlockSize * 2);
     return output.takeBytes();
   }
 
@@ -95,9 +100,6 @@ final class TarEncoder {
   /// Writes [payload] followed by zero padding through a block boundary.
   void _writeTarPayload(ByteWriter output, Uint8List payload) {
     output.writeBytes(payload);
-    final int padding = _tarPaddedLength(payload.length) - payload.length;
-    if (padding != 0) {
-      output.writeBytes(Uint8List(padding));
-    }
+    output.writeZeroes(_tarPaddedLength(payload.length) - payload.length);
   }
 }

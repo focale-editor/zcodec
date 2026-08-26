@@ -1,4 +1,4 @@
-part of '../tar.dart';
+part of 'package:zcodec/src/tar.dart';
 
 /// Selects the semantic type of a TAR entry.
 enum TarEntryType {
@@ -165,16 +165,14 @@ final class TarArchive {
   /// Materialized archive entries.
   final List<TarEntry> entries;
 
+  /// Lookup from entry name to its first occurrence, built on demand.
+  Map<String, TarEntry>? _index;
+
   /// Creates an archive from [entries].
   TarArchive({Iterable<TarEntry> entries = const <TarEntry>[]}) : entries = List<TarEntry>.unmodifiable(entries);
 
   /// Finds the first entry whose path equals [name].
-  TarEntry? find(String name) {
-    for (final TarEntry entry in entries) {
-      if (entry.name == name) {
-        return entry;
-      }
-    }
-    return null;
-  }
+  TarEntry? find(String name) => (_index ??= <String, TarEntry>{
+    for (final TarEntry entry in entries.reversed) entry.name: entry,
+  })[name];
 }

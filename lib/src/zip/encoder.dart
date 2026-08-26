@@ -1,43 +1,46 @@
 part of 'package:zcodec/src/zip.dart';
 
 /// Serializes ZIP archives without native compression libraries.
-final class ZipEncoder {
-  /// Raw DEFLATE implementation used for compressed entries.
-  static const DeflateCodec _deflate = DeflateCodec();
+///
+/// [passwordProvider] is consulted for encrypted entries. [randomBytes]
+/// defaults to a secure SDK source and is exposed primarily for deterministic
+/// tests. ZIP64 records are selected automatically, or for every entry when
+/// [forceZip64] is true.
+final class ZipEncoder extends BinaryEncoder<ZipArchive> {
+  /// Compression effort from 0 through 9 for DEFLATE entries.
+  final int level;
 
-  /// Creates a stateless ZIP encoder.
-  const ZipEncoder();
+  /// Password lookup consulted for encrypted entries.
+  final ZipPasswordProvider? passwordProvider;
 
-  /// Encodes [archive] using [level] for DEFLATE entries.
-  ///
-  /// [passwordProvider] is consulted for encrypted entries. [randomBytes]
-  /// defaults to a secure SDK source and is exposed primarily for deterministic
-  /// tests. ZIP64 is selected automatically, or for every entry when
-  /// [forceZip64] is true.
-  Uint8List encode(
-    ZipArchive archive, {
-    int level = 6,
-    ZipPasswordProvider? passwordProvider,
-    ZipRandomBytes? randomBytes,
-    bool forceZip64 = false,
-  }) {
-    if (level < 0 || level > 9) {
-      throw RangeError.range(level, 0, 9, 'level');
-    }
+  /// Random-byte source used for encryption headers and salts.
+  final ZipRandomBytes? randomBytes;
+
+  /// Whether every entry and end record uses ZIP64.
+  final bool forceZip64;
+
+  /// Creates a ZIP encoder.
+  const ZipEncoder({
+    this.level = defaultCompressionLevel,
+    this.passwordProvider,
+    this.randomBytes,
+    this.forceZip64 = false,
+  });
+
+  @override
+  Uint8List convert(ZipArchive archive) {
+    validateCompressionLevel(level);
     final ByteWriter output = ByteWriter();
     final List<_EncodedEntry> encodedEntries = <_EncodedEntry>[];
     for (final ZipEntry entry in archive.entries) {
       _validateEntryName(entry.name);
-      final Uint8List name = Uint8List.fromList(utf8.encode(entry.name));
-      final Uint8List comment = Uint8List.fromList(utf8.encode(entry.comment));
-      if (name.length > 0xffff || comment.length > 0xffff) {
-        throw ZCodecException('ZIP entry metadata is too long for "${entry.name}"');
-      }
+      final Uint8List name = _encodeEntryText(entry.name, label: 'entry name');
+      final Uint8List comment = _encodeEntryText(entry.comment, label: 'entry comment');
       final Uint8List data = entry.data;
       final int checksum = crc32(data);
       final Uint8List compressed = switch (entry.compression) {
         ZipCompression.store => data,
-        ZipCompression.deflate => _deflate.encode(data, level: level),
+        ZipCompression.deflate => DeflateEncoder(level: level).convert(data),
       };
       final int actualMethod = entry.compression == ZipCompression.store ? 0 : 8;
       final _EncryptedPayload encrypted = _encryptPayload(
@@ -64,12 +67,13 @@ final class ZipEncoder {
         name: name,
         comment: comment,
         compressed: encrypted.bytes,
+        uncompressedSize: data.length,
         localHeaderOffset: output.length,
         diskStart: 0,
         method: encrypted.headerMethod,
         flags: encrypted.flags,
-        extra: _joinBytes(encrypted.extra, localZip64Extra),
-        centralExtra: _joinBytes(encrypted.extra, centralZip64Extra),
+        extra: joinBytes(encrypted.extra, localZip64Extra),
+        centralExtra: joinBytes(encrypted.extra, centralZip64Extra),
         zip64: zip64,
         headerChecksum: encrypted.headerChecksum,
         dosDate: timestamp.date,
@@ -107,7 +111,7 @@ final class ZipEncoder {
         ..writeUint16(encoded.dosDate)
         ..writeUint32(encoded.headerChecksum)
         ..writeUint32(encoded.zip64 ? 0xffffffff : encoded.compressed.length)
-        ..writeUint32(encoded.zip64 ? 0xffffffff : entry.uncompressedSize)
+        ..writeUint32(encoded.zip64 ? 0xffffffff : encoded.uncompressedSize)
         ..writeUint16(encoded.name.length)
         ..writeUint16(encoded.centralExtra.length)
         ..writeUint16(encoded.comment.length)
@@ -120,10 +124,7 @@ final class ZipEncoder {
         ..writeBytes(encoded.comment);
     }
     final int centralDirectorySize = output.length - centralDirectoryOffset;
-    final Uint8List archiveComment = Uint8List.fromList(utf8.encode(archive.comment));
-    if (archiveComment.length > 0xffff) {
-      throw const ZCodecException('ZIP archive comment exceeds 65535 bytes');
-    }
+    final Uint8List archiveComment = _encodeEntryText(archive.comment, label: 'archive comment');
     final bool zip64Archive = forceZip64 || encodedEntries.any((entry) => entry.zip64) || encodedEntries.length >= 0xffff || centralDirectorySize >= 0xffffffff || centralDirectoryOffset >= 0xffffffff;
     if (zip64Archive) {
       final int zip64EndOffset = output.length;
@@ -159,27 +160,13 @@ final class ZipEncoder {
   /// Encodes [archive] into ordered split ZIP volumes.
   ///
   /// Every non-final volume is at most [volumeSize] bytes and should normally
-  /// be named `.z01`, `.z02`, and so on; the final volume uses `.zip`.
-  /// Password, randomness, compression, and ZIP64 options have the same
-  /// meaning as in [encode].
-  List<Uint8List> encodeVolumes(
-    ZipArchive archive, {
-    required int volumeSize,
-    int level = 6,
-    ZipPasswordProvider? passwordProvider,
-    ZipRandomBytes? randomBytes,
-    bool forceZip64 = false,
-  }) {
-    if (volumeSize < 65536) {
-      throw RangeError.value(volumeSize, 'volumeSize', 'Split ZIP volumes must contain at least 65536 bytes');
+  /// be named `.z01`, `.z02`, and so on; the final volume uses `.zip`. A single
+  /// volume is returned when the whole archive fits.
+  List<Uint8List> convertToVolumes(ZipArchive archive, {required int volumeSize}) {
+    if (volumeSize < _minimumVolumeSize) {
+      throw RangeError.value(volumeSize, 'volumeSize', 'Split ZIP volumes must contain at least $_minimumVolumeSize bytes');
     }
-    final Uint8List single = encode(
-      archive,
-      level: level,
-      passwordProvider: passwordProvider,
-      randomBytes: randomBytes,
-      forceZip64: forceZip64,
-    );
+    final Uint8List single = convert(archive);
     if (single.length <= volumeSize) {
       return <Uint8List>[single];
     }
@@ -193,305 +180,3 @@ final class ZipEncoder {
     );
   }
 }
-
-/// Writes ZIP entries incrementally to an arbitrary Dart byte sink.
-///
-/// Buffered entries may use DEFLATE and password encryption.
-/// [addStoredStream] copies large, already-compressed assets without retaining
-/// them in memory. Classic ZIP and ZIP64 output are both supported.
-final class ZipStreamWriter {
-  /// Raw DEFLATE implementation used by buffered compressed entries.
-  static const DeflateCodec _deflate = DeflateCodec();
-
-  /// Destination receiving serialized ZIP chunks.
-  final Sink<List<int>> _output;
-
-  /// Password lookup used for encrypted buffered entries.
-  final ZipPasswordProvider? passwordProvider;
-
-  /// Random-byte source used for encryption headers and salts.
-  final ZipRandomBytes _randomBytes;
-
-  /// Whether every entry and the archive end records use ZIP64.
-  final bool forceZip64;
-
-  /// Central-directory metadata accumulated for completed entries.
-  final List<_WrittenZipEntry> _entries = <_WrittenZipEntry>[];
-
-  /// Number of bytes emitted to [_output].
-  int _offset = 0;
-
-  /// Whether the central directory has already been emitted.
-  bool _closed = false;
-
-  /// Creates a writer that leaves [output] open after [close].
-  ZipStreamWriter(
-    Sink<List<int>> output, {
-    this.passwordProvider,
-    ZipRandomBytes? randomBytes,
-    this.forceZip64 = false,
-  }) : _output = output,
-       _randomBytes = randomBytes ?? _secureRandomBytes;
-
-  /// Adds one buffered [entry], optionally compressing it at [level].
-  void add(ZipEntry entry, {int level = 6}) {
-    _ensureOpen();
-    _ensureEntryCapacity();
-    if (level < 0 || level > 9) {
-      throw RangeError.range(level, 0, 9, 'level');
-    }
-    final Uint8List name = _encodeEntryText(entry.name, label: 'name');
-    final Uint8List comment = _encodeEntryText(entry.comment, label: 'comment');
-    final Uint8List data = entry.data;
-    final int checksum = crc32(data);
-    final Uint8List compressed = switch (entry.compression) {
-      ZipCompression.store => data,
-      ZipCompression.deflate => _deflate.encode(data, level: level),
-    };
-    final int actualMethod = entry.compression == ZipCompression.store ? 0 : 8;
-    final _EncryptedPayload encrypted = _encryptPayload(
-      compressed: compressed,
-      encryption: entry.encryption,
-      password: passwordProvider?.call(entry.name),
-      checksum: checksum,
-      actualMethod: actualMethod,
-      randomBytes: _randomBytes,
-    );
-    final ({int date, int time}) timestamp = _encodeDosTimestamp(entry.modified);
-    final int localHeaderOffset = _offset;
-    final bool zip64 = forceZip64 || data.length >= 0xffffffff || encrypted.bytes.length >= 0xffffffff || localHeaderOffset >= 0xffffffff;
-    final Uint8List localExtra = _joinBytes(
-      encrypted.extra,
-      zip64 ? _zip64LocalExtra(uncompressedSize: data.length, compressedSize: encrypted.bytes.length) : Uint8List(0),
-    );
-    final Uint8List centralExtra = _joinBytes(
-      encrypted.extra,
-      zip64
-          ? _zip64CentralExtra(
-              uncompressedSize: data.length,
-              compressedSize: encrypted.bytes.length,
-              localHeaderOffset: localHeaderOffset,
-              diskStart: 0,
-            )
-          : Uint8List(0),
-    );
-    _append(
-      ByteWriter()
-        ..writeUint32(0x04034b50)
-        ..writeUint16(zip64 ? 45 : 20)
-        ..writeUint16(encrypted.flags)
-        ..writeUint16(encrypted.headerMethod)
-        ..writeUint16(timestamp.time)
-        ..writeUint16(timestamp.date)
-        ..writeUint32(encrypted.headerChecksum)
-        ..writeUint32(zip64 ? 0xffffffff : encrypted.bytes.length)
-        ..writeUint32(zip64 ? 0xffffffff : data.length)
-        ..writeUint16(name.length)
-        ..writeUint16(localExtra.length)
-        ..writeBytes(name)
-        ..writeBytes(localExtra),
-    );
-    _appendBytes(encrypted.bytes);
-    _entries.add(
-      _WrittenZipEntry(
-        name: name,
-        comment: comment,
-        checksum: encrypted.headerChecksum,
-        compressedSize: encrypted.bytes.length,
-        uncompressedSize: data.length,
-        localHeaderOffset: localHeaderOffset,
-        method: encrypted.headerMethod,
-        flags: encrypted.flags,
-        centralExtra: centralExtra,
-        zip64: zip64,
-        dosDate: timestamp.date,
-        dosTime: timestamp.time,
-        isDirectory: entry.isDirectory,
-      ),
-    );
-  }
-
-  /// Copies one stored entry from [data] without buffering the full payload.
-  ///
-  /// [size] must be known before streaming and must match the exact number of
-  /// bytes emitted by [data]. A classic or ZIP64 data descriptor records the
-  /// incremental CRC-32. Streamed entries are not encrypted; use [add] when
-  /// per-entry encryption is required.
-  Future<void> addStoredStream({
-    required String name,
-    required Stream<List<int>> data,
-    required int size,
-    DateTime? modified,
-    String comment = '',
-  }) async {
-    _ensureOpen();
-    _ensureEntryCapacity();
-    _validateEntryName(name);
-    if (size < 0) {
-      throw RangeError.value(size, 'size', 'A ZIP stream size must not be negative');
-    }
-    final Uint8List encodedName = _encodeEntryText(name, label: 'name');
-    final Uint8List encodedComment = _encodeEntryText(comment, label: 'comment');
-    final ({int date, int time}) timestamp = _encodeDosTimestamp(modified ?? DateTime.now());
-    final int localHeaderOffset = _offset;
-    final bool zip64 = forceZip64 || size >= 0xffffffff || localHeaderOffset >= 0xffffffff;
-    final Uint8List localExtra = zip64 ? _zip64LocalExtra(uncompressedSize: size, compressedSize: size) : Uint8List(0);
-    final Uint8List centralExtra = zip64 ? _zip64CentralExtra(uncompressedSize: size, compressedSize: size, localHeaderOffset: localHeaderOffset, diskStart: 0) : Uint8List(0);
-    const int flags = 0x0808;
-    _append(
-      ByteWriter()
-        ..writeUint32(0x04034b50)
-        ..writeUint16(zip64 ? 45 : 20)
-        ..writeUint16(flags)
-        ..writeUint16(0)
-        ..writeUint16(timestamp.time)
-        ..writeUint16(timestamp.date)
-        ..writeUint32(0)
-        ..writeUint32(zip64 ? 0xffffffff : 0)
-        ..writeUint32(zip64 ? 0xffffffff : 0)
-        ..writeUint16(encodedName.length)
-        ..writeUint16(localExtra.length)
-        ..writeBytes(encodedName)
-        ..writeBytes(localExtra),
-    );
-    final Crc32Accumulator checksum = Crc32Accumulator();
-    int actualSize = 0;
-    await for (final List<int> chunk in data) {
-      if (chunk.length > size - actualSize) {
-        throw ZCodecException('ZIP stream "$name" exceeds its declared $size-byte size');
-      }
-      final Uint8List bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
-      checksum.add(bytes);
-      _appendBytes(bytes);
-      actualSize += bytes.length;
-    }
-    if (actualSize != size) {
-      throw ZCodecException('ZIP stream "$name" has $actualSize bytes; expected $size');
-    }
-    final ByteWriter descriptor = ByteWriter()
-      ..writeUint32(0x08074b50)
-      ..writeUint32(checksum.value);
-    if (zip64) {
-      descriptor
-        ..writeUint64(size)
-        ..writeUint64(size);
-    } else {
-      descriptor
-        ..writeUint32(size)
-        ..writeUint32(size);
-    }
-    _append(descriptor);
-    _entries.add(
-      _WrittenZipEntry(
-        name: encodedName,
-        comment: encodedComment,
-        checksum: checksum.value,
-        compressedSize: size,
-        uncompressedSize: size,
-        localHeaderOffset: localHeaderOffset,
-        method: 0,
-        flags: flags,
-        centralExtra: centralExtra,
-        zip64: zip64,
-        dosDate: timestamp.date,
-        dosTime: timestamp.time,
-        isDirectory: name.endsWith('/'),
-      ),
-    );
-  }
-
-  /// Writes the central directory and prevents further entries from being added.
-  ///
-  /// The destination sink is deliberately not closed because its ownership
-  /// remains with the caller.
-  void close({String comment = ''}) {
-    _ensureOpen();
-    _closed = true;
-    final Uint8List archiveComment = _encodeEntryText(comment, label: 'archive comment');
-    final int centralDirectoryOffset = _offset;
-    for (final _WrittenZipEntry entry in _entries) {
-      _append(
-        ByteWriter()
-          ..writeUint32(0x02014b50)
-          ..writeUint16(entry.zip64 ? 45 : 20)
-          ..writeUint16(entry.zip64 ? 45 : 20)
-          ..writeUint16(entry.flags)
-          ..writeUint16(entry.method)
-          ..writeUint16(entry.dosTime)
-          ..writeUint16(entry.dosDate)
-          ..writeUint32(entry.checksum)
-          ..writeUint32(entry.zip64 ? 0xffffffff : entry.compressedSize)
-          ..writeUint32(entry.zip64 ? 0xffffffff : entry.uncompressedSize)
-          ..writeUint16(entry.name.length)
-          ..writeUint16(entry.centralExtra.length)
-          ..writeUint16(entry.comment.length)
-          ..writeUint16(entry.zip64 ? 0xffff : 0)
-          ..writeUint16(0)
-          ..writeUint32(entry.isDirectory ? 0x10 : 0)
-          ..writeUint32(entry.zip64 ? 0xffffffff : entry.localHeaderOffset)
-          ..writeBytes(entry.name)
-          ..writeBytes(entry.centralExtra)
-          ..writeBytes(entry.comment),
-      );
-    }
-    final int centralDirectorySize = _offset - centralDirectoryOffset;
-    final bool zip64Archive = forceZip64 || _entries.any((entry) => entry.zip64) || _entries.length >= 0xffff || centralDirectorySize >= 0xffffffff || centralDirectoryOffset >= 0xffffffff;
-    if (zip64Archive) {
-      final int zip64EndOffset = _offset;
-      _append(
-        ByteWriter()
-          ..writeUint32(0x06064b50)
-          ..writeUint64(44)
-          ..writeUint16(45)
-          ..writeUint16(45)
-          ..writeUint32(0)
-          ..writeUint32(0)
-          ..writeUint64(_entries.length)
-          ..writeUint64(_entries.length)
-          ..writeUint64(centralDirectorySize)
-          ..writeUint64(centralDirectoryOffset)
-          ..writeUint32(0x07064b50)
-          ..writeUint32(0)
-          ..writeUint64(zip64EndOffset)
-          ..writeUint32(1),
-      );
-    }
-    _append(
-      ByteWriter()
-        ..writeUint32(0x06054b50)
-        ..writeUint16(0)
-        ..writeUint16(0)
-        ..writeUint16(zip64Archive ? 0xffff : _entries.length)
-        ..writeUint16(zip64Archive ? 0xffff : _entries.length)
-        ..writeUint32(zip64Archive ? 0xffffffff : centralDirectorySize)
-        ..writeUint32(zip64Archive ? 0xffffffff : centralDirectoryOffset)
-        ..writeUint16(archiveComment.length)
-        ..writeBytes(archiveComment),
-    );
-  }
-
-  /// Emits all bytes accumulated by [writer].
-  void _append(ByteWriter writer) => _appendBytes(writer.takeBytes());
-
-  /// Emits [bytes] and advances the archive offset.
-  void _appendBytes(List<int> bytes) {
-    _output.add(bytes);
-    _offset += bytes.length;
-  }
-
-  /// Rejects mutations after [close].
-  void _ensureOpen() {
-    if (_closed) {
-      throw StateError('The ZIP stream writer is already closed');
-    }
-  }
-
-  /// Rejects entry counts beyond Dart's portable exact-integer range.
-  void _ensureEntryCapacity() {
-    if (_entries.length >= 0x1fffffffffffff) {
-      throw const ZCodecException('ZIP entry count exceeds Dart\'s portable exact-integer range');
-    }
-  }
-}
-
-/// Parses ZIP central directories and lazily inflates their entries.

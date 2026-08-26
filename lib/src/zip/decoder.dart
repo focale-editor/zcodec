@@ -1,7 +1,10 @@
 part of 'package:zcodec/src/zip.dart';
 
 /// Parses ZIP central directories and lazily inflates their entries.
-final class ZipDecoder {
+///
+/// Only the central directory is read up front; entry payloads are inflated,
+/// decrypted, and checked the first time [ZipEntry.data] is requested.
+final class ZipDecoder extends BinaryDecoder<ZipArchive> {
   /// Resource limits applied before any entry is decompressed.
   final ZipLimits limits;
 
@@ -12,8 +15,9 @@ final class ZipDecoder {
   const ZipDecoder({this.limits = const ZipLimits(), this.passwordProvider});
 
   /// Decodes [input] while retaining one shared copy for lazy entry access.
-  ZipArchive decode(List<int> input) {
-    final Uint8List bytes = input is Uint8List ? input : Uint8List.fromList(input);
+  @override
+  ZipArchive convert(List<int> input) {
+    final Uint8List bytes = asBytes(input);
     try {
       return _decode(bytes, const <int>[0]);
     } on ZCodecException {
@@ -26,7 +30,7 @@ final class ZipDecoder {
   /// Decodes ordered split or spanned ZIP [volumes].
   ///
   /// The first item is disk zero and the final item contains the end record.
-  ZipArchive decodeVolumes(List<List<int>> volumes) {
+  ZipArchive convertVolumes(List<List<int>> volumes) {
     if (volumes.isEmpty) {
       throw ArgumentError.value(volumes, 'volumes', 'At least one ZIP volume is required');
     }
@@ -225,5 +229,3 @@ final class ZipDecoder {
     return ZipArchive(entries: entries, comment: archiveComment, volumeCount: volumeStarts.length);
   }
 }
-
-/// Holds the encoded form and metadata of an entry during serialization.

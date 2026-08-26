@@ -1,7 +1,15 @@
-part of '../tar.dart';
+part of 'package:zcodec/src/tar.dart';
 
 /// Size in bytes of every TAR header and padding block.
 const int _tarBlockSize = 512;
+
+/// Largest TAR number ZCodec reads or writes.
+///
+/// GNU base-256 fields are 8 or 12 bytes wide, which is far more than a Dart
+/// integer can hold, so both directions are bounded by the exact-integer range
+/// shared by every Dart platform rather than by the nominal field width. The
+/// limit is over eight petabytes, well beyond any real archive.
+const int _maximumTarNumber = 0x1fffffffffffff;
 
 /// Holds the fields parsed from one physical TAR header.
 final class _TarHeader {
@@ -56,21 +64,6 @@ final class _TarHeader {
     required this.deviceMajor,
     required this.deviceMinor,
   });
-}
-
-/// Holds name and prefix bytes selected for a ustar header.
-final class _TarPathFields {
-  /// Name-field bytes, limited to 100 bytes.
-  final Uint8List name;
-
-  /// Prefix-field bytes, limited to 155 bytes.
-  final Uint8List prefix;
-
-  /// Whether a PAX path override is required.
-  final bool requiresPax;
-
-  /// Creates a split ustar path representation.
-  const _TarPathFields({required this.name, required this.prefix, required this.requiresPax});
 }
 
 /// Maps [type] to its conventional ustar typeflag.
@@ -129,7 +122,10 @@ _TarHeader _parseTarHeader(Uint8List bytes, int offset, {required bool verifyChe
     }
   }
   final String name = _readTarText(block, 0, 100);
-  final String prefix = _readTarText(block, 345, 155);
+  // The prefix field only exists in POSIX ustar. The GNU format, whose magic
+  // ends with a space instead of a NUL, stores atime and ctime at the same
+  // offset, so reading it as a path there would corrupt the entry name.
+  final String prefix = _isPosixUstar(block) ? _readTarText(block, 345, 155) : '';
   return _TarHeader(
     name: prefix.isEmpty ? name : '$prefix/$name',
     mode: _readTarNumber(block, 100, 8, label: 'mode'),
@@ -145,6 +141,9 @@ _TarHeader _parseTarHeader(Uint8List bytes, int offset, {required bool verifyChe
     deviceMinor: _readTarNumber(block, 337, 8, label: 'device minor'),
   );
 }
+
+/// Whether [block] carries the POSIX ustar magic, which is `ustar` and a NUL.
+bool _isPosixUstar(Uint8List block) => block[257] == 0x75 && block[258] == 0x73 && block[259] == 0x74 && block[260] == 0x61 && block[261] == 0x72 && block[262] == 0;
 
 /// Reads one NUL- or space-terminated TAR text field.
 String _readTarText(Uint8List bytes, int offset, int length) {
@@ -167,15 +166,20 @@ String _readTarText(Uint8List bytes, int offset, int length) {
 /// Reads an octal or GNU base-256 TAR number.
 int _readTarNumber(Uint8List bytes, int offset, int length, {required String label}) {
   if ((bytes[offset] & 0x80) != 0) {
-    final int bitCount = length * 8 - 1;
-    int value = bytes[offset] & 0x7f;
+    // Base-256 fields hold a two's-complement integer whose most significant
+    // bit is the base-256 marker and whose next bit carries the sign. Negative
+    // values are read through their one's complement so that no intermediate
+    // result has to represent 2^(8 * length - 1).
+    final bool negative = (bytes[offset] & 0x40) != 0;
+    int magnitude = negative ? (~bytes[offset]) & 0x7f : bytes[offset] & 0x7f;
     for (int index = 1; index < length; index++) {
-      value = value * 256 + bytes[offset + index];
+      final int byte = negative ? (~bytes[offset + index]) & 0xff : bytes[offset + index];
+      if (magnitude > (_maximumTarNumber - byte) ~/ 256) {
+        throw ZCodecException('TAR $label field exceeds the supported range');
+      }
+      magnitude = magnitude * 256 + byte;
     }
-    if ((bytes[offset] & 0x40) != 0) {
-      value -= 1 << bitCount;
-    }
-    return value;
+    return negative ? -magnitude - 1 : magnitude;
   }
   int start = offset;
   final int end = offset + length;
@@ -251,16 +255,15 @@ void _writeTarNumber(Uint8List target, int offset, int length, int value) {
       return;
     }
   }
-  final int bitCount = length * 8 - 1;
-  final int minimum = -(1 << (bitCount - 1));
-  final int maximum = (1 << (bitCount - 1)) - 1;
-  if (value < minimum || value > maximum) {
-    throw RangeError.range(value, minimum, maximum, 'value', 'TAR number does not fit its field');
+  if (value < -_maximumTarNumber - 1 || value > _maximumTarNumber) {
+    throw RangeError.range(value, -_maximumTarNumber - 1, _maximumTarNumber, 'value', 'TAR number does not fit its field');
   }
-  int encoded = value < 0 ? value + (1 << bitCount) : value;
+  // Arithmetic shifting writes the two's-complement representation directly,
+  // sign-extending a negative value through the leading bytes of the field.
+  int encoded = value;
   for (int index = length - 1; index >= 0; index--) {
     target[offset + index] = encoded & 0xff;
-    encoded ~/= 256;
+    encoded >>= 8;
   }
   target[offset] |= 0x80;
 }
@@ -281,154 +284,3 @@ void _writeTarBytes(Uint8List target, int offset, int length, List<int> value) {
   }
   target.setRange(offset, offset + value.length, value);
 }
-
-/// Splits [path] into the ustar name and prefix fields when possible.
-_TarPathFields _splitTarPath(String path) {
-  final Uint8List whole = Uint8List.fromList(utf8.encode(path));
-  if (whole.length <= 100) {
-    return _TarPathFields(name: whole, prefix: Uint8List(0), requiresPax: false);
-  }
-  for (int index = path.length - 1; index > 0; index--) {
-    if (path.codeUnitAt(index) != 0x2f) {
-      continue;
-    }
-    final Uint8List prefix = Uint8List.fromList(utf8.encode(path.substring(0, index)));
-    final Uint8List name = Uint8List.fromList(utf8.encode(path.substring(index + 1)));
-    if (prefix.length <= 155 && name.isNotEmpty && name.length <= 100) {
-      return _TarPathFields(name: name, prefix: prefix, requiresPax: false);
-    }
-  }
-  final Uint8List fallback = whole.length <= 100 ? whole : Uint8List.fromList(utf8.encode(_tarBaseName(path)));
-  return _TarPathFields(
-    name: fallback.length <= 100 ? fallback : Uint8List.fromList(ascii.encode('PaxPath')),
-    prefix: Uint8List(0),
-    requiresPax: true,
-  );
-}
-
-/// Encodes [headers] as POSIX PAX length-prefixed records.
-Uint8List _encodePaxHeaders(Map<String, String> headers) {
-  final BytesBuilder output = BytesBuilder(copy: false);
-  for (final MapEntry<String, String> header in headers.entries) {
-    if (header.key.isEmpty || header.key.contains('=') || header.key.contains('\n') || header.value.contains('\u0000')) {
-      throw ZCodecException('Invalid PAX header key or value: ${header.key}');
-    }
-    final Uint8List body = Uint8List.fromList(utf8.encode('${header.key}=${header.value}\n'));
-    int length = body.length + 2;
-    while (true) {
-      final int actual = body.length + length.toString().length + 1;
-      if (actual == length) {
-        break;
-      }
-      length = actual;
-    }
-    output
-      ..add(ascii.encode('$length '))
-      ..add(body);
-  }
-  return output.takeBytes();
-}
-
-/// Parses POSIX PAX length-prefixed [data].
-Map<String, String> _parsePaxHeaders(Uint8List data) {
-  final Map<String, String> result = <String, String>{};
-  int offset = 0;
-  while (offset < data.length) {
-    final int recordStart = offset;
-    int space = offset;
-    while (space < data.length && data[space] != 0x20) {
-      if (data[space] < 0x30 || data[space] > 0x39) {
-        throw const ZCodecException('Invalid PAX record length');
-      }
-      space++;
-    }
-    if (space == offset || space == data.length) {
-      throw const ZCodecException('Truncated PAX record length');
-    }
-    final int length = int.parse(ascii.decode(Uint8List.sublistView(data, offset, space)));
-    final int end = recordStart + length;
-    if (length <= space - recordStart + 2 || end > data.length || data[end - 1] != 0x0a) {
-      throw const ZCodecException('Invalid PAX record bounds');
-    }
-    final Uint8List content = Uint8List.sublistView(data, space + 1, end - 1);
-    final int equals = content.indexOf(0x3d);
-    if (equals <= 0) {
-      throw const ZCodecException('Invalid PAX key-value record');
-    }
-    final String key = utf8.decode(Uint8List.sublistView(content, 0, equals));
-    final String value = utf8.decode(Uint8List.sublistView(content, equals + 1));
-    result[key] = value;
-    offset = end;
-  }
-  return result;
-}
-
-/// Decodes a GNU long-name or long-link metadata payload.
-String _decodeGnuLongText(Uint8List data) {
-  int end = data.indexOf(0);
-  if (end < 0) {
-    end = data.length;
-  }
-  while (end > 0 && data[end - 1] == 0x0a) {
-    end--;
-  }
-  final Uint8List value = Uint8List.sublistView(data, 0, end);
-  try {
-    return utf8.decode(value);
-  } on FormatException {
-    return latin1.decode(value);
-  }
-}
-
-/// Converts a PAX decimal timestamp to a UTC [DateTime].
-DateTime _decodePaxTime(String value) {
-  final double seconds = double.parse(value);
-  if (!seconds.isFinite) {
-    throw const ZCodecException('Invalid non-finite PAX timestamp');
-  }
-  return DateTime.fromMicrosecondsSinceEpoch((seconds * 1000000).round(), isUtc: true);
-}
-
-/// Converts [value] to the shortest practical PAX timestamp.
-String _encodePaxTime(DateTime value) {
-  final int microseconds = value.toUtc().microsecondsSinceEpoch;
-  final bool negative = microseconds < 0;
-  final int magnitude = microseconds.abs();
-  final int seconds = magnitude ~/ 1000000;
-  final int remainder = magnitude.remainder(1000000);
-  if (remainder == 0) {
-    return negative ? '-$seconds' : '$seconds';
-  }
-  final String fraction = remainder.toString().padLeft(6, '0').replaceFirst(RegExp(r'0+$'), '');
-  return '${negative ? '-' : ''}$seconds.$fraction';
-}
-
-/// Returns the final path component of [path].
-String _tarBaseName(String path) {
-  final List<String> components = path.split('/');
-  for (int index = components.length - 1; index >= 0; index--) {
-    if (components[index].isNotEmpty) {
-      return components[index];
-    }
-  }
-  return 'entry';
-}
-
-/// Validates a nonempty TAR path without imposing extraction policy.
-void _validateTarPath(String path, {required String label}) {
-  if (path.isEmpty || path.contains('\u0000')) {
-    throw ArgumentError.value(path, label, 'TAR paths must be nonempty and must not contain NUL');
-  }
-}
-
-/// Whether [path] is relative and contains no parent traversal component.
-bool _hasSafeTarPath(String path) {
-  if (path.startsWith('/') || path.startsWith(r'\')) {
-    return false;
-  }
-  final List<String> components = path.replaceAll(r'\', '/').split('/');
-  return !components.contains('..') && (components.isEmpty || !components.first.contains(':'));
-}
-
-/// Returns [length] rounded up to the next TAR block boundary.
-int _tarPaddedLength(int length) => ((length + _tarBlockSize - 1) ~/ _tarBlockSize) * _tarBlockSize;

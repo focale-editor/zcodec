@@ -1,18 +1,24 @@
-part of '../tar.dart';
+part of 'package:zcodec/src/tar.dart';
 
 /// Parses POSIX ustar, GNU long-name, and PAX TAR archives.
-final class TarDecoder {
+///
+/// Decoded entries reference the input buffer instead of copying it, so an
+/// archive stays cheap to inspect even when only a few entries are read.
+final class TarDecoder extends BinaryDecoder<TarArchive> {
   /// Resource limits applied before entry payloads are exposed.
   final TarLimits limits;
 
-  /// Creates a TAR decoder using [limits] for untrusted archives.
-  const TarDecoder({this.limits = const TarLimits()});
+  /// Whether every physical header checksum is validated.
+  final bool verifyChecksum;
 
-  /// Decodes [input], optionally validating every physical header checksum.
-  TarArchive decode(List<int> input, {bool verifyChecksum = true}) {
-    final Uint8List bytes = input is Uint8List ? input : Uint8List.fromList(input);
+  /// Creates a TAR decoder using [limits] for untrusted archives.
+  const TarDecoder({this.limits = const TarLimits(), this.verifyChecksum = true});
+
+  @override
+  TarArchive convert(List<int> input) {
+    final Uint8List bytes = asBytes(input);
     try {
-      return _decode(bytes, verifyChecksum: verifyChecksum);
+      return _decode(bytes);
     } on ZCodecException {
       rethrow;
     } on Object catch (error) {
@@ -21,7 +27,7 @@ final class TarDecoder {
   }
 
   /// Parses one validated TAR byte buffer.
-  TarArchive _decode(Uint8List bytes, {required bool verifyChecksum}) {
+  TarArchive _decode(Uint8List bytes) {
     if (bytes.length < _tarBlockSize || bytes.length % _tarBlockSize != 0) {
       throw const ZCodecException('TAR archive length is not a multiple of 512 bytes');
     }
@@ -54,7 +60,7 @@ final class TarDecoder {
         final Uint8List metadata = _readTarPayload(bytes, offset, header.size);
         offset += _tarPaddedLength(header.size);
         if (header.typeFlag == 0x78) {
-          localPax.addAll(_parsePaxHeaders(metadata));
+          _applyPaxRecords(localPax, _parsePaxHeaders(metadata));
         } else if (header.typeFlag == 0x67) {
           _applyPaxRecords(globalPax, _parsePaxHeaders(metadata));
         } else if (header.typeFlag == 0x4c) {

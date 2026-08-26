@@ -20,11 +20,8 @@ Future<void> main(List<String> arguments) async {
 
 /// Decodes a real-world `.tar.gz` [archive] and checks for regular content.
 Future<void> _verifySourceArchive(File archive) async {
-  final Uint8List tarBytes = const GzipCodec().decode(
-    await archive.readAsBytes(),
-    maxOutputBytes: 2 * 1024 * 1024 * 1024,
-  );
-  final TarArchive decoded = const TarDecoder().decode(tarBytes);
+  final Uint8List tarBytes = const GzipCodec(maxOutputBytes: 2 * 1024 * 1024 * 1024).decode(await archive.readAsBytes());
+  final TarArchive decoded = const TarCodec().decode(tarBytes);
   if (decoded.entries.isEmpty || !decoded.entries.any((entry) => entry.type == TarEntryType.regular && entry.data.isNotEmpty)) {
     throw StateError('${archive.path} did not contain a nonempty regular TAR entry');
   }
@@ -41,13 +38,13 @@ Future<void> _verifyZCodecOutput(Directory temporary) async {
       TarEntry(name: 'link', type: TarEntryType.symbolicLink, linkName: 'directory/hello.txt'),
     ],
   );
-  final Uint8List tarBytes = const TarEncoder().encode(archive);
+  final Uint8List tarBytes = const TarCodec().encode(archive);
   final File tarFile = File('${temporary.path}/zcodec.tar');
   await tarFile.writeAsBytes(tarBytes);
   await _run('tar', <String>['-tf', tarFile.path]);
 
   final File gzipFile = File('${temporary.path}/zcodec.tar.gz');
-  await gzipFile.writeAsBytes(const GzipCodec().encode(tarBytes, name: 'zcodec.tar', headerChecksum: true));
+  await gzipFile.writeAsBytes(const GzipCodec(header: GzipHeader(name: 'zcodec.tar', headerChecksum: true)).encode(tarBytes));
   await _run('gzip', <String>['-t', gzipFile.path]);
   await _run('tar', <String>['-tzf', gzipFile.path]);
 }
@@ -66,7 +63,7 @@ Future<void> _verifyExternalOutput(Directory temporary) async {
     final File archive = File('${temporary.path}/external-$format.tar');
     final List<String> members = format == 'ustar' ? <String>['hello.txt', 'link'] : <String>['.'];
     await _run('tar', <String>['--format=$format', '-cf', archive.path, '-C', source.path, ...members]);
-    final TarArchive decoded = const TarDecoder().decode(await archive.readAsBytes());
+    final TarArchive decoded = const TarCodec().decode(await archive.readAsBytes());
     final TarEntry hello = decoded.entries.firstWhere((entry) => entry.name.endsWith('hello.txt'));
     if (utf8.decode(hello.data) != 'hello from external tar') {
       throw StateError('ZCodec did not decode the external $format TAR archive correctly');
