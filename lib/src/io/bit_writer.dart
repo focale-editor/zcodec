@@ -21,6 +21,12 @@ final class BitWriter {
   /// Number of complete bytes emitted so far.
   int get length => _bytes.length;
 
+  /// Number of bits pending in the next output byte.
+  int get pendingBits => _bitCount;
+
+  /// Returns complete bytes without inserting padding into the bit stream.
+  Uint8List takeCompleteBytes() => _bytes.takeBytes();
+
   /// Writes the [count] least significant bits of [value].
   void writeBits(int value, int count) {
     if (count == 0) {

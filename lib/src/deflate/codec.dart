@@ -25,9 +25,8 @@ final class DeflateCodec extends ByteCodec {
 
 /// Compresses bytes into a raw DEFLATE stream.
 ///
-/// Level 0 writes stored blocks. Other levels use LZ77 matching and fixed
-/// Huffman blocks, with progressively deeper match searches. Stored blocks are
-/// emitted whenever they would be smaller than the compressed form.
+/// Level 0 writes stored blocks. Other levels select stored, fixed-Huffman,
+/// or dynamic-Huffman blocks by bit cost, with deeper searches at higher levels.
 final class DeflateEncoder extends ByteEncoder {
   /// Compression effort from 0 through 9.
   final int level;
@@ -39,11 +38,13 @@ final class DeflateEncoder extends ByteEncoder {
   Uint8List convert(List<int> input) {
     validateCompressionLevel(level);
     final Uint8List bytes = asBytes(input);
-    if (level == 0) {
-      return _encodeStored(bytes);
-    }
-    final Uint8List compressed = _DeflateEncoder(bytes, level).encode();
-    return compressed.length <= _storedLength(bytes.length) ? compressed : _encodeStored(bytes);
+    return _DeflateEncoder(bytes, level).encode();
+  }
+
+  @override
+  ByteConversionSink startChunkedConversion(Sink<List<int>> sink) {
+    validateCompressionLevel(level);
+    return _DeflateEncodingSink(sink, level);
   }
 }
 
@@ -54,6 +55,9 @@ final class DeflateDecoder extends ByteDecoder {
 
   /// Creates a DEFLATE decoder.
   const DeflateDecoder({this.maxOutputBytes});
+
+  @override
+  ByteConversionSink startChunkedConversion(Sink<List<int>> sink) => _DeflateDecodingSink(sink, maxOutputBytes);
 
   /// Decompresses [input], which must contain exactly one complete stream.
   ///

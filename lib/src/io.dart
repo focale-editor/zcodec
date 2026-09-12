@@ -17,3 +17,21 @@ Uint8List asBytes(List<int> input) => input is Uint8List ? input : Uint8List.fro
 Uint8List joinBytes(List<int> first, List<int> second) => Uint8List(first.length + second.length)
   ..setRange(0, first.length, first)
   ..setRange(first.length, first.length + second.length, second);
+
+/// Adapts byte callbacks without transferring ownership of a parent sink.
+final class CallbackByteSink implements Sink<List<int>> {
+  /// Receives each byte chunk.
+  final void Function(List<int>) onData;
+
+  /// Optional completion callback.
+  final void Function()? onDone;
+
+  /// Creates a byte sink from callbacks.
+  const CallbackByteSink(this.onData, {this.onDone});
+
+  @override
+  void add(List<int> data) => onData(data);
+
+  @override
+  void close() => onDone?.call();
+}

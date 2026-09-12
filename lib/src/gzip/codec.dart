@@ -48,6 +48,13 @@ final class GzipEncoder extends ByteEncoder {
   const GzipEncoder({this.level = defaultCompressionLevel, this.header = const GzipHeader()});
 
   @override
+  ByteConversionSink startChunkedConversion(Sink<List<int>> sink) {
+    validateCompressionLevel(level);
+    header.validate();
+    return _GzipEncodingSink(sink, level, header);
+  }
+
+  @override
   Uint8List convert(List<int> input) {
     validateCompressionLevel(level);
     header.validate();
@@ -69,14 +76,35 @@ final class GzipDecoder extends ByteDecoder {
   const GzipDecoder({this.maxOutputBytes, this.maxMembers = defaultMaxGzipMembers});
 
   @override
+  ByteConversionSink startChunkedConversion(Sink<List<int>> sink) => _GzipDecodingSink(sink, maxOutputBytes, maxMembers);
+
+  @override
   Uint8List convert(List<int> input) {
-    final List<GzipMember> members = GzipMemberDecoder(maxOutputBytes: maxOutputBytes, maxMembers: maxMembers).convert(input);
-    if (members.length == 1) {
-      return members.single.data;
+    if (maxOutputBytes != null && maxOutputBytes! < 0) {
+      throw RangeError.value(maxOutputBytes!, 'maxOutputBytes', 'Must not be negative');
     }
-    final BytesBuilder output = BytesBuilder(copy: false);
-    for (final GzipMember member in members) {
-      output.add(member.data);
+    if (maxMembers <= 0) {
+      throw RangeError.value(maxMembers, 'maxMembers', 'Must be positive');
+    }
+    final Uint8List bytes = asBytes(input);
+    if (bytes.isEmpty) {
+      throw const ZCodecException('A GZIP file must contain at least one member');
+    }
+    final BytesBuilder output = BytesBuilder();
+    int offset = 0;
+    int count = 0;
+    int total = 0;
+    while (offset < bytes.length) {
+      if (count++ >= maxMembers) {
+        throw ZCodecException('GZIP file exceeds the $maxMembers-member limit');
+      }
+      final _DecodedGzipMember decoded = _decodeMember(bytes, offset, maxOutputBytes == null ? null : maxOutputBytes! - total);
+      offset = decoded.nextOffset;
+      if (count == 1 && offset == bytes.length) {
+        return decoded.member.data;
+      }
+      total += decoded.member.data.length;
+      output.add(decoded.member.data);
     }
     return output.takeBytes();
   }

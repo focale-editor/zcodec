@@ -5,7 +5,7 @@ part of 'package:zcodec/src/io.dart';
 /// Bit order follows RFC 1951: within a byte, the least significant bit is
 /// consumed first, while multi-bit integer fields are stored least significant
 /// bit first as well.
-final class BitReader {
+base class BitReader {
   /// Complete input buffer.
   final Uint8List bytes;
 
@@ -24,13 +24,33 @@ final class BitReader {
   /// Number of input bytes consumed, excluding buffered whole bytes.
   int get byteOffset => _byteOffset - (_bitCount >>> 3);
 
+  /// Number of bits available, including pending buffered bits.
+  int get remainingBits => (bytes.length - _byteOffset) * 8 + _bitCount;
+
+  /// Position of the next bit, relative to the source buffer.
+  int get bitOffset => _byteOffset * 8 - _bitCount;
+
+  /// Restores a previously saved bit position.
+  void seekBits(int offset) {
+    RangeError.checkValueInInterval(offset, 0, bytes.length * 8, 'offset');
+    _byteOffset = offset >>> 3;
+    _bits = 0;
+    _bitCount = 0;
+    readBits(offset & 7);
+  }
+
+  /// Requires [count] buffered bits, allowing incremental readers to suspend.
+  void requireBits(int count) {
+    _fill(count);
+    if (_bitCount < count) {
+      throw const ZCodecException('Truncated DEFLATE stream');
+    }
+  }
+
   /// Reads [count] bits, which must not exceed 24.
   int readBits(int count) {
     if (_bitCount < count) {
-      _fill(count);
-      if (_bitCount < count) {
-        throw const ZCodecException('Truncated DEFLATE stream');
-      }
+      requireBits(count);
     }
     final int value = count == 0 ? 0 : _bits & ((1 << count) - 1);
     _bits >>>= count;
@@ -52,7 +72,7 @@ final class BitReader {
   /// Consumes [count] bits previously inspected with [peekBits].
   void dropBits(int count) {
     if (_bitCount < count) {
-      throw const ZCodecException('Truncated DEFLATE stream');
+      requireBits(count);
     }
     _bits >>>= count;
     _bitCount -= count;

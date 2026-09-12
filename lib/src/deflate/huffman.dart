@@ -15,7 +15,7 @@ final class _HuffmanTable {
   ///
   /// Zero is unambiguous as a sentinel because every defined code has a length
   /// of at least one bit.
-  final Int32List _entries;
+  final Uint16List _entries;
 
   /// Builds a canonical Huffman lookup from per-symbol [lengths].
   factory _HuffmanTable(List<int> lengths, {required String name, bool allowEmpty = false}) {
@@ -31,7 +31,7 @@ final class _HuffmanTable {
     }
     if (maximumLength == 0) {
       if (allowEmpty) {
-        return _HuffmanTable._(0, Int32List(0));
+        return _HuffmanTable._(0, Uint16List(0));
       }
       throw ZCodecException('Empty $name Huffman tree');
     }
@@ -54,7 +54,7 @@ final class _HuffmanTable {
       code = (code + counts[bits - 1]) << 1;
       nextCode[bits] = code;
     }
-    final Int32List entries = Int32List(1 << maximumLength);
+    final Uint16List entries = Uint16List(1 << maximumLength);
     for (int symbol = 0; symbol < lengths.length; symbol++) {
       final int length = lengths[symbol];
       if (length == 0) {
@@ -79,6 +79,7 @@ final class _HuffmanTable {
   int read(BitReader input) {
     final int entry = _entries[input.peekBits(_maximumLength)];
     if (entry == 0) {
+      input.requireBits(_maximumLength);
       throw const ZCodecException('Invalid Huffman code');
     }
     input.dropBits(entry & 0xf);

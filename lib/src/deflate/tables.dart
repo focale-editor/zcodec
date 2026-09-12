@@ -45,6 +45,12 @@ final _HuffmanTable _fixedDistanceTable = _HuffmanTable(Uint8List(32)..fillRange
 /// Bit-reversed code of every fixed literal/length symbol.
 final Uint16List _fixedLiteralCodes = _buildFixedCodes();
 
+/// Five-bit lengths of the fixed distance alphabet.
+final Uint8List _fixedDistanceLengths = Uint8List(32)..fillRange(0, 32, 5);
+
+/// Reversed fixed distance codes, shared by all blocks.
+final Uint16List _fixedDistanceCodes = Uint16List.fromList(<int>[for (int index = 0; index < 32; index++) _reverseBits(index, 5)]);
+
 /// Match-length symbol index for lengths 3 through 258.
 final Uint8List _lengthSymbols = _buildLengthSymbols();
 
@@ -78,6 +84,8 @@ Uint8List _buildLengthSymbols() {
     }
     symbols[length] = index;
   }
+  // Length 258 has a dedicated code without the five extra bits of code 284.
+  symbols[_maximumMatch] = 28;
   return symbols;
 }
 

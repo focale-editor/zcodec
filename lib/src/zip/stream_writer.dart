@@ -18,6 +18,12 @@ final class ZipStreamWriter {
   /// Whether every entry and the archive end records use ZIP64.
   final bool forceZip64;
 
+  /// Waits until a buffering destination has consumed previously added bytes.
+  ///
+  /// Stream consumers, including IOSink, are paced automatically through
+  /// addStream. Supply this callback for an asynchronous plain Sink instead.
+  final Future<void> Function()? flush;
+
   /// Central-directory metadata accumulated for completed entries.
   final List<_WrittenZipEntry> _entries = <_WrittenZipEntry>[];
 
@@ -27,12 +33,19 @@ final class ZipStreamWriter {
   /// Whether the central directory has already been emitted.
   bool _closed = false;
 
+  /// Whether a streamed entry currently owns the output.
+  bool _busy = false;
+
+  /// Whether a failed streamed entry left an incomplete archive.
+  bool _failed = false;
+
   /// Creates a writer that leaves [output] open after [close].
   ZipStreamWriter(
     Sink<List<int>> output, {
     this.passwordProvider,
     ZipRandomBytes? randomBytes,
     this.forceZip64 = false,
+    this.flush,
   }) : _output = output,
        _randomBytes = randomBytes ?? _secureRandomBytes;
 
@@ -127,6 +140,19 @@ final class ZipStreamWriter {
     String comment = '',
   }) async {
     _ensureOpen();
+    _busy = true;
+    try {
+      await _addStoredStream(name: name, data: data, size: size, modified: modified, comment: comment);
+    } on Object {
+      _failed = true;
+      rethrow;
+    } finally {
+      _busy = false;
+    }
+  }
+
+  /// Writes one entry while respecting the destination's consumption rate.
+  Future<void> _addStoredStream({required String name, required Stream<List<int>> data, required int size, DateTime? modified, required String comment}) async {
     _ensureEntryCapacity();
     _validateEntryName(name);
     if (size < 0) {
@@ -158,14 +184,36 @@ final class ZipStreamWriter {
     );
     final Crc32Accumulator checksum = Crc32Accumulator();
     int actualSize = 0;
-    await for (final List<int> chunk in data) {
+    List<int> validateChunk(List<int> chunk) {
       if (chunk.length > size - actualSize) {
         throw ZCodecException('ZIP stream "$name" exceeds its declared $size-byte size');
       }
       final Uint8List bytes = chunk is Uint8List ? chunk : Uint8List.fromList(chunk);
       checksum.add(bytes);
-      _appendBytes(bytes);
       actualSize += bytes.length;
+      return bytes;
+    }
+
+    final Sink<List<int>> destination = _output;
+    final Future<void> Function()? drain = flush;
+    if (drain == null && destination is StreamConsumer<List<int>>) {
+      await (destination as StreamConsumer<List<int>>).addStream(
+        data.map((chunk) {
+          final List<int> bytes = validateChunk(chunk);
+          _offset += bytes.length;
+          return bytes;
+        }),
+      );
+    } else {
+      if (drain != null) {
+        await drain();
+      }
+      await for (final List<int> chunk in data) {
+        _appendBytes(validateChunk(chunk));
+        if (drain != null) {
+          await drain();
+        }
+      }
     }
     if (actualSize != size) {
       throw ZCodecException('ZIP stream "$name" has $actualSize bytes; expected $size');
@@ -183,6 +231,9 @@ final class ZipStreamWriter {
         ..writeUint32(size);
     }
     _append(descriptor);
+    if (drain != null) {
+      await drain();
+    }
     _entries.add(
       _WrittenZipEntry(
         name: encodedName,
@@ -285,6 +336,12 @@ final class ZipStreamWriter {
   void _ensureOpen() {
     if (_closed) {
       throw StateError('The ZIP stream writer is already closed');
+    }
+    if (_busy) {
+      throw StateError('A streamed ZIP entry is still being written');
+    }
+    if (_failed) {
+      throw StateError('The ZIP stream writer contains an incomplete entry');
     }
   }
 

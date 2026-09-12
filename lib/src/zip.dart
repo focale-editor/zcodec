@@ -1,6 +1,7 @@
 /// ZIP archives, including ZIP64, split volumes, and per-entry encryption.
 library;
 
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';

@@ -2,6 +2,7 @@
 /// Adler-32 trailer.
 library;
 
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:zcodec/src/checksums.dart';
@@ -11,3 +12,4 @@ import 'package:zcodec/src/exception.dart';
 import 'package:zcodec/src/io.dart';
 
 part 'zlib/codec.dart';
+part 'zlib/streaming.dart';

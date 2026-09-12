@@ -30,7 +30,15 @@ final class _TerminatedText {
 
 /// Writes one complete GZIP [member] compressed at [level].
 void _encodeMember(ByteWriter output, GzipMember member, int level) {
-  final GzipHeader header = member.header;
+  _writeGzipHeader(output, member.header, level);
+  output
+    ..writeBytes(DeflateEncoder(level: level).convert(member.data))
+    ..writeUint32(crc32(member.data))
+    ..writeUint32(member.data.length & 0xffffffff);
+}
+
+/// Writes the metadata and optional header checksum of one GZIP member.
+void _writeGzipHeader(ByteWriter output, GzipHeader header, int level) {
   final Uint8List? encodedName = _encodeHeaderText(header.name, label: 'name');
   final Uint8List? encodedComment = _encodeHeaderText(header.comment, label: 'comment');
   int flags = header.isText ? 0x01 : 0;
@@ -82,10 +90,6 @@ void _encodeMember(ByteWriter output, GzipMember member, int level) {
     // RFC 1952 stores the two least significant bytes of the header CRC-32.
     output.writeUint16(crc32(encodedHeader) & 0xffff);
   }
-  output
-    ..writeBytes(DeflateEncoder(level: level).convert(member.data))
-    ..writeUint32(crc32(member.data))
-    ..writeUint32(member.data.length & 0xffffffff);
 }
 
 /// Decodes one member beginning at [start].

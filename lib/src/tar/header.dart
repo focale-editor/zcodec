@@ -212,9 +212,10 @@ Uint8List _writeTarHeader(
   String? storedUserName,
   String? storedGroupName,
   int? typeFlag,
+  _TarPathFields? pathFields,
 }) {
   final Uint8List block = Uint8List(_tarBlockSize);
-  final _TarPathFields path = _splitTarPath(storedName);
+  final _TarPathFields path = pathFields ?? _splitTarPath(storedName);
   _writeTarBytes(block, 0, 100, path.name);
   _writeTarNumber(block, 100, 8, entry.mode);
   _writeTarNumber(block, 108, 8, entry.userId);

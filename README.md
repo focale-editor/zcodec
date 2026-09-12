@@ -1,4 +1,4 @@
-_# ZCodec
+# ZCodec
 
 ZCodec provides dependency-free, synchronous codecs for DEFLATE, zlib, GZIP, TAR, and ZIP data. Its compression engine and archive parsers are implemented entirely in Dart: they do not import `dart:io`, call a native zlib backend, or use FFI. The core API therefore works on the Dart VM and the Web.
 
@@ -133,6 +133,8 @@ writer.close();
 
 `ZipStreamWriter` does not import `dart:io` and does not close the caller-owned sink. A VM application can pass an `IOSink`; a Web application can provide any `Sink<List<int>>`.
 
+For `addStoredStream`, destinations that also implement `StreamConsumer<List<int>>`, including `IOSink`, regulate input through `addStream`. A custom asynchronous sink should expose completion through `ZipStreamWriter(outputSink, flush: outputSink.flush)`; the writer then awaits that callback after each input chunk. A plain sink without either contract cannot signal backpressure. Always await `addStoredStream` before adding another entry or closing the writer. A failed streamed entry prevents finalization of the archive.
+
 ZIP entries decoded from an archive are inflated lazily. Call `ZipEntry.release()` after consuming a large entry, or `ZipArchive.release()` for all entries, to allow the decoded buffers to be reclaimed while retaining the original archive bytes.
 
 ## Codec structure
@@ -146,11 +148,19 @@ ZIP entries decoded from an archive are inflated lazily. Call `ZipEntry.release(
 | `TarCodec`        | `TarArchive`       | TAR archive         |
 | `ZipCodec`        | `ZipArchive`       | ZIP archive         |
 
-All of them extend `BinaryCodec<S>`, a `Codec<S, List<int>>` whose encoded side is always bytes. The byte-to-byte compressors additionally share `ByteCodec`. Converters are constant values, so `codec.encoder` and `codec.decoder` can be passed to `Stream.transform`; because a container format is only complete once its last byte is known, the chunked converters buffer their input and emit one result on close.
+All of them extend `BinaryCodec<S>`, a `Codec<S, List<int>>` whose encoded side is always bytes. The byte-to-byte compressors additionally share `ByteCodec`. Their reusable `codec.encoder` and `codec.decoder` converters can be passed to `Stream.transform`.
+
+DEFLATE, zlib, and GZIP byte converters work incrementally: they emit multiple output chunks and preserve their dictionary across input chunks. Compression buffers at most one 65,535-byte input block and 32 KiB of history; decompression keeps bounded history and pending parser state. They do not retain the complete input or previously emitted output. For example:
+
+```dart
+await destination.addStream(source.transform(const GzipCodec().encoder));
+```
+
+Output boundaries need not match input boundaries. Decoders can emit bytes before a later checksum, truncation, or output-limit error is discovered: treat output as provisional until the stream completes successfully. `maxOutputBytes` applies cumulatively, including across GZIP members. The single-buffer `encode`/`decode` methods remain synchronous. `GzipMemberCodec`, `TarCodec`, and `ZipCodec` decoders still buffer chunked input to return complete structured values.
 
 ## Safety and format support
 
-- DEFLATE decoding supports stored, fixed-Huffman, and dynamic-Huffman blocks.
+- DEFLATE encoding and decoding support stored, fixed-Huffman, and dynamic-Huffman blocks. The encoder chooses the smallest estimated block representation and uses a bounded match dictionary at every compression level.
 - zlib validates its header and Adler-32 trailer.
 - GZIP supports optional name, comment, extra, timestamp, text, OS, and header-checksum fields; concatenated members; CRC-32 and ISIZE validation; and output/member limits.
 - TAR decoding supports V7-compatible and POSIX ustar headers, GNU base-256 numbers, GNU long names and links, global and local PAX headers, links, devices, directories, FIFOs, and unknown vendor typeflags. TAR encoding emits ustar with automatic PAX extensions.
@@ -162,4 +172,4 @@ All of them extend `BinaryCodec<S>`, a `Codec<S, List<int>>` whose encoded side 
 - `TarEntry.hasSafePath`, `TarEntry.hasSafeLinkTarget`, and `ZipEntry.hasSafePath` must be checked before extracting an entry to disk.
 - Proprietary PKWARE Strong Encryption is detected and rejected explicitly; it is distinct from WinZip AES and requires separately licensed PKWARE technology.
 
-All compression, archive parsing, checksums, ZipCrypto, AES, SHA-1, HMAC, and PBKDF2 code is implemented in Dart. ZCodec uses only Dart SDK libraries and has no runtime package dependencies._
+All compression, archive parsing, checksums, ZipCrypto, AES, SHA-1, HMAC, and PBKDF2 code is implemented in Dart. ZCodec uses only Dart SDK libraries and has no runtime package dependencies.

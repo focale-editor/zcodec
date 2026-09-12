@@ -43,54 +43,8 @@ final class _DeflateDecoder {
 
   /// Builds and decodes the Huffman trees of one dynamic block.
   void _decodeDynamic() {
-    final int literalCount = input.readBits(5) + 257;
-    final int distanceCount = input.readBits(5) + 1;
-    final int codeLengthCount = input.readBits(4) + 4;
-    final Uint8List codeLengths = Uint8List(_codeLengthOrder.length);
-    for (int index = 0; index < codeLengthCount; index++) {
-      codeLengths[_codeLengthOrder[index]] = input.readBits(3);
-    }
-    final _HuffmanTable codeLengthTable = _HuffmanTable(codeLengths, name: 'code-length');
-    final int total = literalCount + distanceCount;
-    final Uint8List lengths = Uint8List(total);
-    int written = 0;
-    while (written < total) {
-      final int symbol = codeLengthTable.read(input);
-      if (symbol <= 15) {
-        lengths[written++] = symbol;
-        continue;
-      }
-      final int value;
-      final int count;
-      switch (symbol) {
-        case 16:
-          if (written == 0) {
-            throw const ZCodecException('A repeated code length has no predecessor');
-          }
-          value = lengths[written - 1];
-          count = input.readBits(2) + 3;
-        case 17:
-          value = 0;
-          count = input.readBits(3) + 3;
-        case 18:
-          value = 0;
-          count = input.readBits(7) + 11;
-        default:
-          throw const ZCodecException('Invalid code-length symbol');
-      }
-      if (written + count > total) {
-        throw const ZCodecException('Repeated code lengths exceed the Huffman alphabet');
-      }
-      lengths.fillRange(written, written + count, value);
-      written += count;
-    }
-    if (lengths[256] == 0) {
-      throw const ZCodecException('DEFLATE block has no end-of-block symbol');
-    }
-    _decodeHuffman(
-      _HuffmanTable(Uint8List.sublistView(lengths, 0, literalCount), name: 'literal/length'),
-      _HuffmanTable(Uint8List.sublistView(lengths, literalCount), name: 'distance', allowEmpty: true),
-    );
+    final ({_HuffmanTable literals, _HuffmanTable distances}) trees = _readDynamicTrees(input);
+    _decodeHuffman(trees.literals, trees.distances);
   }
 
   /// Decodes literals and back-references using the supplied trees.
@@ -117,4 +71,56 @@ final class _DeflateDecoder {
       }
     }
   }
+}
+
+/// Reads the complete Huffman description at the start of a dynamic block.
+({_HuffmanTable literals, _HuffmanTable distances}) _readDynamicTrees(BitReader input) {
+  final int literalCount = input.readBits(5) + 257;
+  final int distanceCount = input.readBits(5) + 1;
+  final int codeLengthCount = input.readBits(4) + 4;
+  final Uint8List codeLengths = Uint8List(_codeLengthOrder.length);
+  for (int index = 0; index < codeLengthCount; index++) {
+    codeLengths[_codeLengthOrder[index]] = input.readBits(3);
+  }
+  final _HuffmanTable codeLengthTable = _HuffmanTable(codeLengths, name: 'code-length');
+  final int total = literalCount + distanceCount;
+  final Uint8List lengths = Uint8List(total);
+  int written = 0;
+  while (written < total) {
+    final int symbol = codeLengthTable.read(input);
+    if (symbol <= 15) {
+      lengths[written++] = symbol;
+      continue;
+    }
+    final int value;
+    final int count;
+    switch (symbol) {
+      case 16:
+        if (written == 0) {
+          throw const ZCodecException('A repeated code length has no predecessor');
+        }
+        value = lengths[written - 1];
+        count = input.readBits(2) + 3;
+      case 17:
+        value = 0;
+        count = input.readBits(3) + 3;
+      case 18:
+        value = 0;
+        count = input.readBits(7) + 11;
+      default:
+        throw const ZCodecException('Invalid code-length symbol');
+    }
+    if (written + count > total) {
+      throw const ZCodecException('Repeated code lengths exceed the Huffman alphabet');
+    }
+    lengths.fillRange(written, written + count, value);
+    written += count;
+  }
+  if (lengths[256] == 0) {
+    throw const ZCodecException('DEFLATE block has no end-of-block symbol');
+  }
+  return (
+    literals: _HuffmanTable(Uint8List.sublistView(lengths, 0, literalCount), name: 'literal/length'),
+    distances: _HuffmanTable(Uint8List.sublistView(lengths, literalCount), name: 'distance', allowEmpty: true),
+  );
 }

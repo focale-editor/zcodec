@@ -48,8 +48,8 @@ abstract base class BinaryDecoder<S> extends Converter<List<int>, S> {
 
   /// Buffers every chunk and decodes them as one input when the sink closes.
   ///
-  /// ZCodec formats are random-access container formats, so a decoder cannot
-  /// emit anything before the last byte has been seen.
+  /// Archive and metadata decoders use this default to return a complete value.
+  /// DEFLATE, zlib, and GZIP byte decoders override it to emit progressively.
   @override
   ByteConversionSink startChunkedConversion(Sink<S> sink) => _BufferingByteSink<S>(sink, convert);
 }

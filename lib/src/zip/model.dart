@@ -173,8 +173,7 @@ final class ZipEntry {
     if (decoded.length != uncompressedSize) {
       throw ZCodecException('ZIP entry "$name" has ${decoded.length} bytes; expected $uncompressedSize');
     }
-    final int actualChecksum = crc32(decoded);
-    if (_verifyChecksum && actualChecksum != checksum) {
+    if (_verifyChecksum && crc32(decoded) != checksum) {
       throw ZCodecException('ZIP entry "$name" has an invalid CRC-32 checksum');
     }
     _decodedData = decoded;

@@ -58,13 +58,14 @@ final class _VolumeWriter {
 
   /// Writes splittable file [data] across as many volumes as necessary.
   void writeData(List<int> data) {
+    final Uint8List bytes = asBytes(data);
     int offset = 0;
     while (offset < data.length) {
       if (_volumes.last.length == volumeSize) {
         _volumes.add(BytesBuilder(copy: false));
       }
       final int count = (data.length - offset).clamp(0, volumeSize - _volumes.last.length);
-      _volumes.last.add(Uint8List.sublistView(asBytes(data), offset, offset + count));
+      _volumes.last.add(Uint8List.sublistView(bytes, offset, offset + count));
       totalLength += count;
       offset += count;
     }
@@ -78,37 +79,20 @@ final class _VolumeWriter {
 List<Uint8List> _encodeSplitArchive(
   ZipArchive archive, {
   required int volumeSize,
-  required int level,
-  required ZipPasswordProvider? passwordProvider,
-  required ZipRandomBytes randomBytes,
+  required Iterable<_PreparedZipEntry> prepared,
   required bool forceZip64,
 }) {
-  validateCompressionLevel(level);
   final _VolumeWriter output = _VolumeWriter(volumeSize);
   final List<_EncodedEntry> encodedEntries = <_EncodedEntry>[];
-  for (final ZipEntry entry in archive.entries) {
-    _validateEntryName(entry.name);
-    final Uint8List name = _encodeEntryText(entry.name, label: 'name');
-    final Uint8List comment = _encodeEntryText(entry.comment, label: 'comment');
-    final Uint8List data = entry.data;
-    final int checksum = crc32(data);
-    final Uint8List compressed = switch (entry.compression) {
-      ZipCompression.store => data,
-      ZipCompression.deflate => DeflateEncoder(level: level).convert(data),
-    };
-    final int actualMethod = entry.compression == ZipCompression.store ? 0 : 8;
-    final _EncryptedPayload encrypted = _encryptPayload(
-      compressed: compressed,
-      encryption: entry.encryption,
-      password: passwordProvider?.call(entry.name),
-      checksum: checksum,
-      actualMethod: actualMethod,
-      randomBytes: randomBytes,
-    );
-    final bool sizeZip64 = forceZip64 || data.length >= 0xffffffff || encrypted.bytes.length >= 0xffffffff;
-    final Uint8List localZip64Extra = sizeZip64 ? _zip64LocalExtra(uncompressedSize: data.length, compressedSize: encrypted.bytes.length) : Uint8List(0);
+  for (final _PreparedZipEntry item in prepared) {
+    final ZipEntry entry = item.entry;
+    final Uint8List name = item.name;
+    final Uint8List comment = item.comment;
+    final _EncryptedPayload encrypted = item.payload;
+    final bool sizeZip64 = forceZip64 || item.uncompressedSize >= 0xffffffff || encrypted.bytes.length >= 0xffffffff;
+    final Uint8List localZip64Extra = sizeZip64 ? _zip64LocalExtra(uncompressedSize: item.uncompressedSize, compressedSize: encrypted.bytes.length) : Uint8List(0);
     final Uint8List localExtra = joinBytes(encrypted.extra, localZip64Extra);
-    final ({int date, int time}) timestamp = _encodeDosTimestamp(entry.modified);
+    final ({int date, int time}) timestamp = item.timestamp;
     final ByteWriter localHeader = ByteWriter()
       ..writeUint32(0x04034b50)
       ..writeUint16(sizeZip64 ? 45 : 20)
@@ -118,7 +102,7 @@ List<Uint8List> _encodeSplitArchive(
       ..writeUint16(timestamp.date)
       ..writeUint32(encrypted.headerChecksum)
       ..writeUint32(sizeZip64 ? 0xffffffff : encrypted.bytes.length)
-      ..writeUint32(sizeZip64 ? 0xffffffff : data.length)
+      ..writeUint32(sizeZip64 ? 0xffffffff : item.uncompressedSize)
       ..writeUint16(name.length)
       ..writeUint16(localExtra.length)
       ..writeBytes(name)
@@ -127,7 +111,7 @@ List<Uint8List> _encodeSplitArchive(
     final bool zip64 = sizeZip64 || localPosition.disk >= 0xffff || localPosition.offset >= 0xffffffff;
     final Uint8List centralZip64Extra = zip64
         ? _zip64CentralExtra(
-            uncompressedSize: data.length,
+            uncompressedSize: item.uncompressedSize,
             compressedSize: encrypted.bytes.length,
             localHeaderOffset: localPosition.offset,
             diskStart: localPosition.disk,
@@ -138,8 +122,8 @@ List<Uint8List> _encodeSplitArchive(
         entry: entry,
         name: name,
         comment: comment,
-        compressed: encrypted.bytes,
-        uncompressedSize: data.length,
+        compressedSize: encrypted.bytes.length,
+        uncompressedSize: item.uncompressedSize,
         localHeaderOffset: localPosition.offset,
         diskStart: localPosition.disk,
         method: encrypted.headerMethod,
@@ -149,7 +133,7 @@ List<Uint8List> _encodeSplitArchive(
         zip64: zip64,
         dosDate: timestamp.date,
         dosTime: timestamp.time,
-        checksum: checksum,
+        checksum: item.checksum,
         headerChecksum: encrypted.headerChecksum,
       ),
     );
@@ -169,7 +153,7 @@ List<Uint8List> _encodeSplitArchive(
       ..writeUint16(encoded.dosTime)
       ..writeUint16(encoded.dosDate)
       ..writeUint32(encoded.headerChecksum)
-      ..writeUint32(encoded.zip64 ? 0xffffffff : encoded.compressed.length)
+      ..writeUint32(encoded.zip64 ? 0xffffffff : encoded.compressedSize)
       ..writeUint32(encoded.zip64 ? 0xffffffff : encoded.uncompressedSize)
       ..writeUint16(encoded.name.length)
       ..writeUint16(encoded.centralExtra.length)

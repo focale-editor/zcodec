@@ -11,8 +11,8 @@ final class _EncodedEntry {
   /// UTF-8 entry comment.
   final Uint8List comment;
 
-  /// Stored or DEFLATE-compressed entry bytes.
-  final Uint8List compressed;
+  /// Number of bytes already written to the entry's data area.
+  final int compressedSize;
 
   /// Number of bytes the entry expands to.
   final int uncompressedSize;
@@ -55,7 +55,7 @@ final class _EncodedEntry {
     required this.entry,
     required this.name,
     required this.comment,
-    required this.compressed,
+    required this.compressedSize,
     required this.uncompressedSize,
     required this.localHeaderOffset,
     required this.diskStart,
@@ -69,6 +69,33 @@ final class _EncodedEntry {
     required this.checksum,
     required this.headerChecksum,
   });
+}
+
+/// A payload compressed and encrypted once, before its physical placement.
+final class _PreparedZipEntry {
+  /// Original entry metadata.
+  final ZipEntry entry;
+
+  /// Encoded file name.
+  final Uint8List name;
+
+  /// Encoded entry comment.
+  final Uint8List comment;
+
+  /// Prepared bytes and encryption-specific metadata.
+  final _EncryptedPayload payload;
+
+  /// Number of uncompressed bytes.
+  final int uncompressedSize;
+
+  /// CRC at preparation time.
+  final int checksum;
+
+  /// Encoded modification time.
+  final ({int date, int time}) timestamp;
+
+  /// Creates a prepared payload.
+  const _PreparedZipEntry({required this.entry, required this.name, required this.comment, required this.payload, required this.uncompressedSize, required this.checksum, required this.timestamp});
 }
 
 /// Holds recognized ZIP extra fields from one header.

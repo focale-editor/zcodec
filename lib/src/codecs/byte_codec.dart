@@ -25,8 +25,9 @@ abstract base class ByteEncoder extends BinaryEncoder<List<int>> {
 
   /// Buffers every chunk and compresses them as one input on close.
   ///
-  /// Compressing each chunk separately would emit several independent streams
-  /// instead of one, so the input is accumulated first.
+  /// This fallback preserves one logical stream across all input chunks.
+  /// DEFLATE, zlib, and GZIP encoders override it with bounded incremental
+  /// compression that retains the dictionary between chunks.
   @override
   ByteConversionSink startChunkedConversion(Sink<List<int>> sink) => _BufferingByteSink<List<int>>(sink, convert);
 }

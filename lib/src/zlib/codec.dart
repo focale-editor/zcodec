@@ -27,6 +27,12 @@ final class ZlibEncoder extends ByteEncoder {
   const ZlibEncoder({this.level = defaultCompressionLevel});
 
   @override
+  ByteConversionSink startChunkedConversion(Sink<List<int>> sink) {
+    validateCompressionLevel(level);
+    return _ZlibEncodingSink(sink, level);
+  }
+
+  @override
   Uint8List convert(List<int> input) {
     validateCompressionLevel(level);
     final Uint8List bytes = asBytes(input);
@@ -59,6 +65,9 @@ final class ZlibDecoder extends ByteDecoder {
   /// Set [maxOutputBytes] when decoding untrusted data to avoid unbounded
   /// allocation.
   const ZlibDecoder({this.maxOutputBytes});
+
+  @override
+  ByteConversionSink startChunkedConversion(Sink<List<int>> sink) => _ZlibDecodingSink(sink, maxOutputBytes);
 
   @override
   Uint8List convert(List<int> input) {

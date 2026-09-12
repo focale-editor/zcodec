@@ -35,17 +35,29 @@ final class _OutputBuffer {
       throw const ZCodecException('Invalid DEFLATE back-reference distance');
     }
     _ensure(count);
-    int source = length - distance;
+    final int source = length - distance;
     if (distance >= count) {
       _bytes.setRange(length, length + count, _bytes, source);
       length += count;
       return;
     }
-    // Overlapping runs must be expanded byte by byte because each copied byte
-    // can be part of the source of a later one.
-    for (int index = 0; index < count; index++) {
-      _bytes[length++] = _bytes[source++];
+    if (distance == 1) {
+      _bytes.fillRange(length, length + count, _bytes[source]);
+      length += count;
+      return;
     }
+    // Each segment reads only initialized bytes. Doubling the available run
+    // also handles overlapping references without a copy call per byte.
+    int copied = 0;
+    int available = distance;
+    while (copied < count) {
+      final int remaining = count - copied;
+      final int part = remaining < available ? remaining : available;
+      _bytes.setRange(length + copied, length + copied + part, _bytes, source);
+      copied += part;
+      available += part;
+    }
+    length += count;
   }
 
   /// Grows storage for [additional] bytes without exceeding the limit.
@@ -68,5 +80,13 @@ final class _OutputBuffer {
   }
 
   /// Returns the initialized portion of the output.
-  Uint8List takeBytes() => Uint8List.sublistView(_bytes, 0, length);
+  Uint8List takeBytes() {
+    if (length == 0) {
+      return Uint8List(0);
+    }
+    if (_bytes.length - length > length ~/ 4) {
+      return _bytes.sublist(0, length);
+    }
+    return Uint8List.sublistView(_bytes, 0, length);
+  }
 }

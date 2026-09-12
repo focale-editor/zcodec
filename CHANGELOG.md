@@ -1,5 +1,14 @@
 # 📰 ZCodec changelog
 
+## Unreleased
+
+* Add bounded-window DEFLATE encoding with per-block stored, fixed, or length-limited dynamic Huffman selection and the dedicated length-258 code.
+* Make DEFLATE, zlib, and GZIP byte stream conversions incremental. Output may now arrive before close and before final integrity validation; expansion limits remain cumulative.
+* Prepare split ZIP entries once, avoiding duplicate compression, encryption, and password/salt callbacks. Honor asynchronous backpressure for stored ZIP streams and reject overlapping writes or finalization after a failed entry.
+* Reduce decompression copy overhead, Huffman table memory, and retained capacity in small decoded buffers. Avoid unnecessary ZIP checksums when verification is disabled and process GZIP members sequentially.
+* Make long TAR path handling linear and reuse encoded path fields.
+* Add reproducible VM/Web benchmarks and regression tests for block boundaries, native interoperability, fragmented streams, output limits, and slow destinations.
+
 ## v0.2.0
 Released on August 27, 2026.
 

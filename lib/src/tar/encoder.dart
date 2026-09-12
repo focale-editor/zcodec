@@ -66,6 +66,7 @@ final class TarEncoder extends BinaryEncoder<TarArchive> {
         modifiedSeconds: modifiedSeconds,
         storedUserName: encodedUser.length <= 32 ? entry.userName : '',
         storedGroupName: encodedGroup.length <= 32 ? entry.groupName : '',
+        pathFields: path,
       ),
     );
     _writeTarPayload(output, entry.data);

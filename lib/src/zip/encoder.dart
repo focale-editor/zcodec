@@ -28,10 +28,11 @@ final class ZipEncoder extends BinaryEncoder<ZipArchive> {
   });
 
   @override
-  Uint8List convert(ZipArchive archive) {
+  Uint8List convert(ZipArchive archive) => _convertPrepared(archive, _prepare(archive));
+
+  /// Compresses each payload only as the serializer requests it.
+  Iterable<_PreparedZipEntry> _prepare(ZipArchive archive) sync* {
     validateCompressionLevel(level);
-    final ByteWriter output = ByteWriter();
-    final List<_EncodedEntry> encodedEntries = <_EncodedEntry>[];
     for (final ZipEntry entry in archive.entries) {
       _validateEntryName(entry.name);
       final Uint8List name = _encodeEntryText(entry.name, label: 'entry name');
@@ -52,11 +53,25 @@ final class ZipEncoder extends BinaryEncoder<ZipArchive> {
         randomBytes: randomBytes ?? _secureRandomBytes,
       );
       final ({int date, int time}) timestamp = _encodeDosTimestamp(entry.modified);
-      final bool zip64 = forceZip64 || data.length >= 0xffffffff || encrypted.bytes.length >= 0xffffffff || output.length >= 0xffffffff;
-      final Uint8List localZip64Extra = zip64 ? _zip64LocalExtra(uncompressedSize: data.length, compressedSize: encrypted.bytes.length) : Uint8List(0);
+      yield _PreparedZipEntry(entry: entry, name: name, comment: comment, payload: encrypted, uncompressedSize: data.length, checksum: checksum, timestamp: timestamp);
+    }
+  }
+
+  /// Serializes prepared payloads, retaining only central-directory metadata.
+  Uint8List _convertPrepared(ZipArchive archive, Iterable<_PreparedZipEntry> prepared) {
+    final ByteWriter output = ByteWriter();
+    final List<_EncodedEntry> encodedEntries = <_EncodedEntry>[];
+    for (final _PreparedZipEntry item in prepared) {
+      final ZipEntry entry = item.entry;
+      final Uint8List name = item.name;
+      final Uint8List comment = item.comment;
+      final _EncryptedPayload encrypted = item.payload;
+      final ({int date, int time}) timestamp = item.timestamp;
+      final bool zip64 = forceZip64 || item.uncompressedSize >= 0xffffffff || encrypted.bytes.length >= 0xffffffff || output.length >= 0xffffffff;
+      final Uint8List localZip64Extra = zip64 ? _zip64LocalExtra(uncompressedSize: item.uncompressedSize, compressedSize: encrypted.bytes.length) : Uint8List(0);
       final Uint8List centralZip64Extra = zip64
           ? _zip64CentralExtra(
-              uncompressedSize: data.length,
+              uncompressedSize: item.uncompressedSize,
               compressedSize: encrypted.bytes.length,
               localHeaderOffset: output.length,
               diskStart: 0,
@@ -66,8 +81,8 @@ final class ZipEncoder extends BinaryEncoder<ZipArchive> {
         entry: entry,
         name: name,
         comment: comment,
-        compressed: encrypted.bytes,
-        uncompressedSize: data.length,
+        compressedSize: encrypted.bytes.length,
+        uncompressedSize: item.uncompressedSize,
         localHeaderOffset: output.length,
         diskStart: 0,
         method: encrypted.headerMethod,
@@ -78,7 +93,7 @@ final class ZipEncoder extends BinaryEncoder<ZipArchive> {
         headerChecksum: encrypted.headerChecksum,
         dosDate: timestamp.date,
         dosTime: timestamp.time,
-        checksum: checksum,
+        checksum: item.checksum,
       );
       encodedEntries.add(encoded);
       output
@@ -90,7 +105,7 @@ final class ZipEncoder extends BinaryEncoder<ZipArchive> {
         ..writeUint16(timestamp.date)
         ..writeUint32(encrypted.headerChecksum)
         ..writeUint32(zip64 ? 0xffffffff : encrypted.bytes.length)
-        ..writeUint32(zip64 ? 0xffffffff : data.length)
+        ..writeUint32(zip64 ? 0xffffffff : item.uncompressedSize)
         ..writeUint16(name.length)
         ..writeUint16(encoded.extra.length)
         ..writeBytes(name)
@@ -110,7 +125,7 @@ final class ZipEncoder extends BinaryEncoder<ZipArchive> {
         ..writeUint16(encoded.dosTime)
         ..writeUint16(encoded.dosDate)
         ..writeUint32(encoded.headerChecksum)
-        ..writeUint32(encoded.zip64 ? 0xffffffff : encoded.compressed.length)
+        ..writeUint32(encoded.zip64 ? 0xffffffff : encoded.compressedSize)
         ..writeUint32(encoded.zip64 ? 0xffffffff : encoded.uncompressedSize)
         ..writeUint16(encoded.name.length)
         ..writeUint16(encoded.centralExtra.length)
@@ -166,17 +181,30 @@ final class ZipEncoder extends BinaryEncoder<ZipArchive> {
     if (volumeSize < _minimumVolumeSize) {
       throw RangeError.value(volumeSize, 'volumeSize', 'Split ZIP volumes must contain at least $_minimumVolumeSize bytes');
     }
-    final Uint8List single = convert(archive);
-    if (single.length <= volumeSize) {
-      return <Uint8List>[single];
+    final List<_PreparedZipEntry> prepared = _prepare(archive).toList();
+    if (_singleVolumeSize(archive, prepared) <= volumeSize) {
+      return <Uint8List>[_convertPrepared(archive, prepared)];
     }
     return _encodeSplitArchive(
       archive,
       volumeSize: volumeSize,
-      level: level,
-      passwordProvider: passwordProvider,
-      randomBytes: randomBytes ?? _secureRandomBytes,
+      prepared: prepared,
       forceZip64: forceZip64,
     );
+  }
+
+  /// Computes exact monovolume size without building an intermediate archive.
+  int _singleVolumeSize(ZipArchive archive, List<_PreparedZipEntry> prepared) {
+    int localSize = 0;
+    int centralSize = 0;
+    bool hasZip64Entry = forceZip64;
+    for (final _PreparedZipEntry item in prepared) {
+      final bool zip64 = forceZip64 || item.uncompressedSize >= 0xffffffff || item.payload.bytes.length >= 0xffffffff || localSize >= 0xffffffff;
+      hasZip64Entry = hasZip64Entry || zip64;
+      localSize += 30 + item.name.length + item.payload.extra.length + (zip64 ? 20 : 0) + item.payload.bytes.length;
+      centralSize += 46 + item.name.length + item.comment.length + item.payload.extra.length + (zip64 ? 32 : 0);
+    }
+    final bool zip64 = hasZip64Entry || prepared.length >= 0xffff || localSize >= 0xffffffff || centralSize >= 0xffffffff;
+    return localSize + centralSize + 22 + (zip64 ? 76 : 0) + _encodeEntryText(archive.comment, label: 'archive comment').length;
   }
 }

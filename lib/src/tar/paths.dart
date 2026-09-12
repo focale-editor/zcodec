@@ -21,17 +21,16 @@ _TarPathFields _splitTarPath(String path) {
   if (whole.length <= 100) {
     return _TarPathFields(name: whole, prefix: Uint8List(0), requiresPax: false);
   }
-  for (int index = path.length - 1; index > 0; index--) {
-    if (path.codeUnitAt(index) != 0x2f) {
+  for (int index = whole.length <= 256 ? whole.length - 1 : 0; index > 0; index--) {
+    if (whole[index] != 0x2f) {
       continue;
     }
-    final Uint8List prefix = Uint8List.fromList(utf8.encode(path.substring(0, index)));
-    final Uint8List name = Uint8List.fromList(utf8.encode(path.substring(index + 1)));
-    if (prefix.length <= 155 && name.isNotEmpty && name.length <= 100) {
-      return _TarPathFields(name: name, prefix: prefix, requiresPax: false);
+    final int nameLength = whole.length - index - 1;
+    if (index <= 155 && nameLength > 0 && nameLength <= 100) {
+      return _TarPathFields(name: Uint8List.sublistView(whole, index + 1), prefix: Uint8List.sublistView(whole, 0, index), requiresPax: false);
     }
   }
-  final Uint8List fallback = whole.length <= 100 ? whole : Uint8List.fromList(utf8.encode(_tarBaseName(path)));
+  final Uint8List fallback = Uint8List.fromList(utf8.encode(_tarBaseName(path)));
   return _TarPathFields(
     name: fallback.length <= 100 ? fallback : Uint8List.fromList(ascii.encode('PaxPath')),
     prefix: Uint8List(0),
@@ -41,13 +40,11 @@ _TarPathFields _splitTarPath(String path) {
 
 /// Returns the final path component of [path].
 String _tarBaseName(String path) {
-  final List<String> components = path.split('/');
-  for (int index = components.length - 1; index >= 0; index--) {
-    if (components[index].isNotEmpty) {
-      return components[index];
-    }
+  int end = path.length;
+  while (end > 0 && path.codeUnitAt(end - 1) == 0x2f) {
+    end--;
   }
-  return 'entry';
+  return end == 0 ? 'entry' : path.substring(path.lastIndexOf('/', end - 1) + 1, end);
 }
 
 /// Validates a nonempty TAR path without imposing extraction policy.

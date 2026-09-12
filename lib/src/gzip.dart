@@ -13,4 +13,5 @@ import 'package:zcodec/src/io.dart';
 part 'gzip/codec.dart';
 part 'gzip/member.dart';
 part 'gzip/member_codec.dart';
+part 'gzip/streaming.dart';
 part 'gzip/support.dart';

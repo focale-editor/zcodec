@@ -7,18 +7,37 @@ const int _adlerModulus = 65521;
 const int _adlerBlock = 5552;
 
 /// Computes the Adler-32 checksum used by zlib streams.
-int adler32(List<int> bytes) {
-  int first = 1;
-  int second = 0;
-  int offset = 0;
-  while (offset < bytes.length) {
-    final int end = offset + _adlerBlock <= bytes.length ? offset + _adlerBlock : bytes.length;
-    for (; offset < end; offset++) {
-      first += bytes[offset] & 0xff;
-      second += first;
+int adler32(List<int> bytes) => (Adler32Accumulator()..add(bytes)).value;
+
+/// Accumulates Adler-32 across independently delivered byte chunks.
+final class Adler32Accumulator {
+  /// First modular sum.
+  int _first = 1;
+
+  /// Second modular sum.
+  int _second = 0;
+
+  /// Creates an accumulator with the canonical empty checksum.
+  Adler32Accumulator();
+
+  /// Current checksum without resetting the accumulator.
+  int get value => ((_second << 16) | _first) & 0xffffffff;
+
+  /// Incorporates all [bytes] without overflowing the portable integer range.
+  void add(List<int> bytes) {
+    int first = _first;
+    int second = _second;
+    int offset = 0;
+    while (offset < bytes.length) {
+      final int end = offset + _adlerBlock <= bytes.length ? offset + _adlerBlock : bytes.length;
+      for (; offset < end; offset++) {
+        first += bytes[offset] & 0xff;
+        second += first;
+      }
+      first %= _adlerModulus;
+      second %= _adlerModulus;
     }
-    first %= _adlerModulus;
-    second %= _adlerModulus;
+    _first = first;
+    _second = second;
   }
-  return ((second << 16) | first) & 0xffffffff;
 }
