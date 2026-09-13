@@ -14,6 +14,9 @@ final class _OutputBuffer {
   /// Creates an output buffer capped at [maximumLength].
   _OutputBuffer(this.maximumLength) : _bytes = Uint8List(maximumLength < 8192 ? maximumLength : 8192);
 
+  /// Number of bytes that fit before storage must grow.
+  int get capacity => _bytes.length;
+
   /// Appends one literal byte.
   void add(int value) {
     if (length == _bytes.length) {
@@ -58,6 +61,34 @@ final class _OutputBuffer {
       available += part;
     }
     length += count;
+  }
+
+  /// Grows storage for [additional] bytes, sized after the final output.
+  ///
+  /// [expectedLength] estimates the final length and receives a sixteenth of
+  /// headroom, while [lengthBound] is a hard upper bound on it. Storage grows
+  /// by at least a quarter, so that repeated underestimates stay logarithmic,
+  /// and by at most four times, which bounds what an overestimate wastes.
+  /// Fitting the final length closely avoids both reallocation copies and the
+  /// trimming copy of [takeBytes]. Storage never exceeds [maximumLength], and
+  /// this method never throws: a token that does not fit fails when written.
+  void reserve(int additional, {required int expectedLength, required int lengthBound}) {
+    final int minimum = _bytes.length + (_bytes.length >>> 2);
+    final int maximum = _bytes.length * 4;
+    final int estimate = expectedLength + (expectedLength >>> 4);
+    int capacity = estimate < minimum ? minimum : (estimate > maximum ? maximum : estimate);
+    if (capacity > lengthBound) {
+      capacity = lengthBound;
+    }
+    if (capacity < length + additional) {
+      capacity = length + additional;
+    }
+    if (capacity > maximumLength) {
+      capacity = maximumLength;
+    }
+    if (capacity > _bytes.length) {
+      _bytes = Uint8List(capacity)..setRange(0, length, _bytes);
+    }
   }
 
   /// Grows storage for [additional] bytes without exceeding the limit.

@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:zcodec/src/checksums.dart';
 import 'package:zcodec/src/deflate.dart' show buildDeflateHuffmanLengths;
+import 'package:zcodec/src/io.dart';
 import 'package:zcodec/zcodec.dart';
 
 void main() {
@@ -86,6 +87,120 @@ void main() {
       }
       final List<GzipMember> members = const GzipMemberCodec().decode(input.takeBytes());
       expect(members.fold<int>(0, (sum, member) => sum + member.data.buffer.lengthInBytes), 1000);
+    });
+  });
+
+  group('DEFLATE decoding', () {
+    test('decodes codes longer than the root lookup table', () {
+      // Fibonacci frequencies push optimal Huffman codes to the 15-bit limit.
+      final Uint32List frequencies = Uint32List(24);
+      final List<int> symbols = <int>[];
+      for (int symbol = 0; symbol < frequencies.length; symbol++) {
+        frequencies[symbol] = symbol < 2 ? 1 : frequencies[symbol - 1] + frequencies[symbol - 2];
+        symbols.addAll(List<int>.filled(frequencies[symbol], symbol * 11));
+      }
+      expect(buildDeflateHuffmanLengths(frequencies, 15).reduce(max), 15);
+      symbols.shuffle(Random(3));
+      final Uint8List input = Uint8List.fromList(symbols);
+      final Uint8List compressed = const DeflateCodec().encode(input);
+      expect(const DeflateCodec().decode(compressed), orderedEquals(input));
+      for (final int chunkSize in <int>[1000, compressed.length]) {
+        expect(_decodeInChunks(const DeflateDecoder(), compressed, chunkSize), orderedEquals(input));
+      }
+    });
+
+    test('rejects malformed tokens with and without trailing input', () {
+      final Map<String, void Function(BitWriter)> tokens = <String, void Function(BitWriter)>{
+        'Reserved DEFLATE length symbol': (writer) => _writeFixedLiteral(writer, 286),
+        'Reserved DEFLATE distance symbol': (writer) {
+          _writeFixedLiteral(writer, 257);
+          writer.writeBits(_reverse(30, 5), 5);
+        },
+        'Invalid DEFLATE back-reference distance': (writer) {
+          _writeFixedLiteral(writer, 257);
+          writer.writeBits(_reverse(10, 5), 5);
+          writer.writeBits(0, 4);
+        },
+      };
+      for (final MapEntry<String, void Function(BitWriter)> token in tokens.entries) {
+        for (final int padding in <int>[0, 64]) {
+          final BitWriter writer = BitWriter()
+            ..writeBits(1, 1)
+            ..writeBits(1, 2);
+          for (int index = 0; index < 20; index++) {
+            _writeFixedLiteral(writer, 97);
+          }
+          token.value(writer);
+          _writeFixedLiteral(writer, 256);
+          writer
+            ..alignToByte()
+            ..writeBytes(Uint8List(padding));
+          final Uint8List bytes = writer.takeBytes();
+          final Matcher rejected = throwsA(isA<ZCodecException>().having((error) => error.message, 'message', token.key));
+          expect(() => const DeflateCodec().decoder.convertPrefix(bytes), rejected, reason: 'padding=$padding');
+          expect(() => _decodeInChunks(const DeflateDecoder(), bytes, bytes.length), rejected, reason: 'padding=$padding');
+        }
+      }
+    });
+
+    test('enforces exact output limits on every decoding path', () {
+      final Random random = Random(5);
+      final Map<String, Uint8List> inputs = <String, Uint8List>{
+        'zeros': Uint8List(200000),
+        'random': _randomBytes(200000),
+        'text': Uint8List.fromList(utf8.encode(List<String>.generate(30000, (_) => 'word${random.nextInt(500)} ').join())),
+      };
+      for (final MapEntry<String, Uint8List> input in inputs.entries) {
+        final Uint8List data = input.value;
+        final Uint8List compressed = const DeflateCodec().encode(data);
+        expect(DeflateCodec(maxOutputBytes: data.length).decode(compressed), orderedEquals(data), reason: input.key);
+        expect(() => DeflateCodec(maxOutputBytes: data.length - 1).decode(compressed), throwsA(isA<ZCodecException>()), reason: input.key);
+        expect(_decodeInChunks(DeflateDecoder(maxOutputBytes: data.length), compressed, 4096), orderedEquals(data), reason: input.key);
+        expect(() => _decodeInChunks(DeflateDecoder(maxOutputBytes: data.length - 1), compressed, 4096), throwsA(isA<ZCodecException>()), reason: input.key);
+      }
+    });
+
+    test('incremental output is independent of input chunk boundaries', () {
+      final Random random = Random(9);
+      final Uint8List input = Uint8List(150000);
+      for (int index = 0; index < input.length; index++) {
+        input[index] = index % 50000 < 10000 ? random.nextInt(256) : (index % 31 == 0 ? random.nextInt(4) : input[index - 1 - random.nextInt(8)]);
+      }
+      for (final int level in <int>[0, 1, 6]) {
+        final Uint8List compressed = DeflateCodec(level: level).encode(input);
+        for (final int chunkSize in <int>[1, 9, 10, 11, 1023, 1024, 1025, 65536, compressed.length]) {
+          final _Collector output = _Collector();
+          final ByteConversionSink decoder = const DeflateDecoder().startChunkedConversion(output);
+          for (int offset = 0; offset < compressed.length; offset += chunkSize) {
+            decoder.add(Uint8List.sublistView(compressed, offset, min(offset + chunkSize, compressed.length)));
+          }
+          decoder.close();
+          // A chunk ends at the first token boundary past 64 KiB.
+          expect(output.largestChunk, lessThan(65536 + 258));
+          expect(output.takeBytes(), orderedEquals(input), reason: 'level=$level, chunkSize=$chunkSize');
+        }
+      }
+    });
+  });
+
+  group('Checksums', () {
+    test('match bitwise references for typed buffers, views, and lists', () {
+      expect(crc32(ascii.encode('123456789')), 0xcbf43926);
+      expect(adler32(ascii.encode('Wikipedia')), 0x11e60398);
+      for (final int length in <int>[0, 1, 7, 8, 9, 15, 16, 17, 5551, 5552, 5553, 100000]) {
+        final Uint8List bytes = _randomBytes(length + 3);
+        final Uint8List view = Uint8List.sublistView(bytes, 3);
+        final List<int> list = List<int>.of(view);
+        for (final List<int> input in <List<int>>[Uint8List.fromList(view), view, list]) {
+          expect(crc32(input), _referenceCrc32(view), reason: 'length=$length, ${input.runtimeType}');
+          expect(adler32(input), _referenceAdler32(view), reason: 'length=$length, ${input.runtimeType}');
+        }
+        final Crc32Accumulator accumulator = Crc32Accumulator();
+        for (int offset = 0; offset < length; offset += 13) {
+          accumulator.add(Uint8List.sublistView(view, offset, min(offset + 13, length)));
+        }
+        expect(accumulator.value, _referenceCrc32(view), reason: 'length=$length');
+      }
     });
   });
 
@@ -314,6 +429,60 @@ Uint8List _randomBytes(int length) {
   return Uint8List.fromList(List<int>.generate(length, (_) => random.nextInt(256)));
 }
 
+/// Decodes [bytes] through [decoder] in chunks of [chunkSize] bytes.
+Uint8List _decodeInChunks(Converter<List<int>, List<int>> decoder, Uint8List bytes, int chunkSize) {
+  final _Collector output = _Collector();
+  final Sink<List<int>> sink = decoder.startChunkedConversion(output);
+  for (int offset = 0; offset < bytes.length; offset += chunkSize) {
+    sink.add(Uint8List.sublistView(bytes, offset, min(offset + chunkSize, bytes.length)));
+  }
+  sink.close();
+  return output.takeBytes();
+}
+
+/// Writes one fixed-Huffman literal/length [symbol].
+void _writeFixedLiteral(BitWriter writer, int symbol) {
+  final ({int code, int length}) fixed = switch (symbol) {
+    <= 143 => (code: 0x30 + symbol, length: 8),
+    <= 255 => (code: 0x190 + symbol - 144, length: 9),
+    <= 279 => (code: symbol - 256, length: 7),
+    _ => (code: 0xc0 + symbol - 280, length: 8),
+  };
+  writer.writeBits(_reverse(fixed.code, fixed.length), fixed.length);
+}
+
+/// Reverses the lowest [length] bits of [value], as Huffman codes are stored.
+int _reverse(int value, int length) {
+  int reversed = 0;
+  for (int bit = 0; bit < length; bit++) {
+    reversed = (reversed << 1) | ((value >>> bit) & 1);
+  }
+  return reversed;
+}
+
+/// Computes CRC-32 one bit at a time.
+int _referenceCrc32(List<int> bytes) {
+  int crc = 0xffffffff;
+  for (final int byte in bytes) {
+    crc ^= byte;
+    for (int bit = 0; bit < 8; bit++) {
+      crc = crc.isOdd ? 0xedb88320 ^ (crc >>> 1) : crc >>> 1;
+    }
+  }
+  return crc ^ 0xffffffff;
+}
+
+/// Computes Adler-32 with a modulo after every byte.
+int _referenceAdler32(List<int> bytes) {
+  int first = 1;
+  int second = 0;
+  for (final int byte in bytes) {
+    first = (first + byte) % 65521;
+    second = (second + first) % 65521;
+  }
+  return (second << 16) | first;
+}
+
 /// Retains emitted chunks to verify data, progress, and close behavior.
 final class _Collector implements Sink<List<int>> {
   /// Copied output bytes.
@@ -322,6 +491,9 @@ final class _Collector implements Sink<List<int>> {
   /// Whether close was called.
   bool closed = false;
 
+  /// Largest emitted chunk.
+  int largestChunk = 0;
+
   /// Number of emitted bytes.
   int get length => _bytes.length;
 
@@ -329,7 +501,10 @@ final class _Collector implements Sink<List<int>> {
   Uint8List takeBytes() => _bytes.takeBytes();
 
   @override
-  void add(List<int> data) => _bytes.add(data);
+  void add(List<int> data) {
+    largestChunk = max(largestChunk, data.length);
+    _bytes.add(data);
+  }
 
   @override
   void close() => closed = true;

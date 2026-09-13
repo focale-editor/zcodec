@@ -35,6 +35,9 @@ void main(List<String> arguments) {
     }
     final Uint8List compressed = const DeflateCodec().encode(corpus.value);
     cases.add(_Case('${corpus.key}/inflate', corpus.value.length, () => const DeflateCodec().decode(compressed)));
+    final Uint8List zlibCompressed = const ZlibCodec().encode(corpus.value);
+    cases.add(_Case('${corpus.key}/zlib-inflate', corpus.value.length, () => const ZlibCodec().decode(zlibCompressed)));
+    cases.add(_Case('${corpus.key}/zlib-inflate-chunked', corpus.value.length, () => _decodeInChunks(const ZlibDecoder(), zlibCompressed)));
     if (platform.hasNativeEncoder) {
       cases.add(_Case('${corpus.key}/native-deflate-6', corpus.value.length, () => platform.nativeEncode(corpus.value)));
       final Uint8List fixed = platform.nativeEncode(corpus.value, fixed: true);
@@ -94,6 +97,17 @@ final class _Case {
 
   /// Creates a scenario.
   const _Case(this.name, this.bytes, this.action);
+}
+
+/// Decodes [bytes] from 64 KiB input chunks, keeping every output chunk.
+List<Uint8List> _decodeInChunks(Converter<List<int>, List<int>> decoder, Uint8List bytes) {
+  List<Uint8List> output = <Uint8List>[];
+  final Sink<List<int>> sink = decoder.startChunkedConversion(ChunkedConversionSink<List<int>>.withCallback((chunks) => output = List<Uint8List>.from(chunks)));
+  for (int offset = 0; offset < bytes.length; offset += 65536) {
+    sink.add(Uint8List.sublistView(bytes, offset, min(offset + 65536, bytes.length)));
+  }
+  sink.close();
+  return output;
 }
 
 /// Builds a seeded semi-compressible text corpus.

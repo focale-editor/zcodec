@@ -101,10 +101,20 @@ final class _IncrementalBitReader extends BitReader {
 /// Resumable decoder states at token boundaries.
 enum _InflateState { header, storedHeader, storedData, dynamicHeader, huffman, done }
 
+/// Largest output chunk emitted by an incremental inflater.
+const int _outputChunkSize = 1 << 16;
+
+/// Largest prefix of a new input chunk copied behind an incomplete token.
+///
+/// Once that token completes, decoding continues on a view of the new chunk.
+const int _pendingJoinSize = 1024;
+
 /// Incremental raw inflater used by the byte codecs and their container frames.
 ///
 /// This implementation detail is exported only by the internal source library.
-/// Output chunks are independent copies; the retained history is at most 32 KiB.
+/// Output chunks are independent copies of about 64 KiB, ending at the first
+/// token boundary past that size; the retained history is at most 32 KiB plus
+/// one chunk.
 final class DeflateDecodingSession {
   /// Receives decoded chunks without being closed by the session.
   final Sink<List<int>> _sink;
@@ -112,8 +122,8 @@ final class DeflateDecodingSession {
   /// Total expansion limit across every emitted chunk.
   final int _maximum;
 
-  /// Dictionary plus at most one pending output chunk.
-  final _OutputBuffer _output = _OutputBuffer(_windowSize * 2 + _maximumMatch);
+  /// Dictionary plus at most one pending output chunk and one match.
+  final _OutputBuffer _output = _OutputBuffer(_windowSize + _outputChunkSize + _maximumMatch);
 
   /// Compressed bytes belonging to an incomplete token or header.
   Uint8List _pending = Uint8List(0);
@@ -152,16 +162,19 @@ final class DeflateDecodingSession {
   /// Whether the final block has been completely decoded.
   bool get isDone => _state == _InflateState.done;
 
+  /// Output length at which the next chunk is emitted.
+  int get _flushLength => _emitted + _outputChunkSize < _windowSize + _outputChunkSize ? _emitted + _outputChunkSize : _windowSize + _outputChunkSize;
+
   /// Decodes [bytes], returning only bytes following a completed raw stream.
   Uint8List add(Uint8List bytes) {
     if (isDone) {
       return bytes;
     }
     int offset = 0;
-    do {
-      final int end = bytes.length - offset > 8192 ? offset + 8192 : bytes.length;
+    while (true) {
       final int priorLength = _pending.length;
-      final Uint8List available = joinBytes(_pending, Uint8List.sublistView(bytes, offset, end));
+      final int end = priorLength == 0 || bytes.length - offset <= _pendingJoinSize ? bytes.length : offset + _pendingJoinSize;
+      final Uint8List available = priorLength == 0 ? Uint8List.sublistView(bytes, offset) : joinBytes(_pending, Uint8List.sublistView(bytes, offset, end));
       final _IncrementalBitReader input = _IncrementalBitReader(available)..seekBits(_skipBits);
       _process(input);
       if (isDone) {
@@ -172,10 +185,20 @@ final class DeflateDecodingSession {
         return Uint8List.sublistView(bytes, consumed);
       }
       final int bitOffset = input.bitOffset;
-      _pending = available.sublist(bitOffset >>> 3);
       _skipBits = bitOffset & 7;
+      if (end < bytes.length && bitOffset >>> 3 >= priorLength) {
+        // The pending token is complete, so the rest of the chunk no longer
+        // needs to be copied behind it.
+        offset += (bitOffset >>> 3) - priorLength;
+        _pending = Uint8List(0);
+        continue;
+      }
+      _pending = available.sublist(bitOffset >>> 3);
+      if (end == bytes.length) {
+        break;
+      }
       offset = end;
-    } while (offset < bytes.length);
+    }
     _flush();
     return Uint8List(0);
   }
@@ -226,7 +249,7 @@ final class DeflateDecodingSession {
             if (available == 0) {
               throw const _NeedDeflateInput();
             }
-            final int capacity = _windowSize * 2 - _output.length;
+            final int capacity = _flushLength - _output.length;
             final int wanted = _storedRemaining < available ? _storedRemaining : available;
             final int count = wanted < capacity ? wanted : capacity;
             _checkOutput(count);
@@ -238,6 +261,15 @@ final class DeflateDecodingSession {
             _distances = trees.distances;
             _state = _InflateState.huffman;
           case _InflateState.huffman:
+            final int priorLength = _output.length;
+            if (_decodeHuffmanRun(input)) {
+              _endBlock();
+              break;
+            }
+            if (_output.length != priorLength) {
+              // Let the flush below run before any token decoded slowly.
+              break;
+            }
             final int symbol = _literals!.read(input);
             if (symbol < 256) {
               _checkOutput(1);
@@ -268,10 +300,31 @@ final class DeflateDecodingSession {
         input.seekBits(checkpoint);
         return;
       }
-      if (_output.length - _emitted >= _windowSize || _output.length >= _windowSize * 2) {
+      if (_output.length >= _flushLength) {
         _flush();
       }
     }
+  }
+
+  /// Decodes tokens in bulk up to the next flush and the output limit.
+  ///
+  /// Returns whether the end-of-block symbol was consumed. The fast loop never
+  /// reads within [_fastInputMargin] bytes of the end, so it cannot suspend.
+  bool _decodeHuffmanRun(_IncrementalBitReader input) {
+    int limit = _flushLength;
+    // Tokens start below the limit, so the last one may end a match past it.
+    final int allowedLength = _output.length + (_maximum - _produced) - _maximumMatch + 1;
+    if (limit > allowedLength) {
+      limit = allowedLength;
+    }
+    final int priorLength = _output.length;
+    if (limit <= priorLength) {
+      return false;
+    }
+    _output._ensure(limit + _maximumMatch - priorLength);
+    final bool endOfBlock = _decodeHuffmanFast(input, _output, _literals!, _distances!, limit);
+    _produced += _output.length - priorLength;
+    return endOfBlock;
   }
 
   /// Checks cumulative output before allocating or emitting a token.
@@ -292,7 +345,7 @@ final class DeflateDecodingSession {
       _emitted = _output.length;
       _sink.add(bytes);
     }
-    if (_output.length >= _windowSize * 2) {
+    if (_output.length >= _windowSize + _outputChunkSize) {
       _output._bytes.setRange(0, _windowSize, _output._bytes, _output.length - _windowSize);
       _output.length = _windowSize;
       _emitted = _windowSize;

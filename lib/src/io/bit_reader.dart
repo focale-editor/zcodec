@@ -15,7 +15,7 @@ base class BitReader {
   /// Pending bits, with the next bit in the least significant position.
   int _bits = 0;
 
-  /// Number of meaningful pending bits, always below 32.
+  /// Number of meaningful pending bits, never above 32.
   int _bitCount = 0;
 
   /// Creates a reader over [bytes].
@@ -29,6 +29,27 @@ base class BitReader {
 
   /// Position of the next bit, relative to the source buffer.
   int get bitOffset => _byteOffset * 8 - _bitCount;
+
+  /// Offset of the next byte not yet loaded into the bit buffer.
+  int get loadedByteOffset => _byteOffset;
+
+  /// Pending bits, with the next bit in the least significant position.
+  int get bitBuffer => _bits;
+
+  /// Number of meaningful bits in [bitBuffer].
+  int get bitBufferLength => _bitCount;
+
+  /// Replaces the buffered state after a caller decoded from local copies.
+  ///
+  /// Hot loops copy [loadedByteOffset], [bitBuffer], and [bitBufferLength] into
+  /// local variables, which the compiler keeps in registers, then store the
+  /// advanced state back here. [bitBufferLength] must not exceed 32.
+  void restoreBuffer({required int loadedByteOffset, required int bitBuffer, required int bitBufferLength}) {
+    assert(bitBufferLength >= 0 && bitBufferLength <= 32 && loadedByteOffset <= bytes.length, 'Invalid bit buffer state');
+    _byteOffset = loadedByteOffset;
+    _bits = bitBuffer;
+    _bitCount = bitBufferLength;
+  }
 
   /// Restores a previously saved bit position.
   void seekBits(int offset) {
@@ -101,7 +122,7 @@ base class BitReader {
 
   /// Loads whole bytes until at least [count] bits are buffered.
   ///
-  /// The buffer is kept below 32 bits so that every shift stays inside the
+  /// The buffer is kept within 32 bits so that every shift stays inside the
   /// range where all Dart platforms, including the Web, agree.
   void _fill(int count) {
     while (_bitCount < count && _byteOffset < bytes.length) {
