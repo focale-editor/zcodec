@@ -1,5 +1,12 @@
 # 📰 ZCodec changelog
 
+## v0.2.1
+Released on September 13, 2026.
+
+* **DOCS**: Added contributing guide, package screenshot, and pubspec metadata. ([#7135b22](https://github.com/focale-editor/zcodec/commit/7135b22))
+* **FEAT**: Added incremental streaming codecs and dynamic Huffman DEFLATE encoding. ([#d5fb84c](https://github.com/focale-editor/zcodec/commit/d5fb84c))
+* **CHORE**: Optimized DEFLATE decoding and checksum calculations. ([#36396ae](https://github.com/focale-editor/zcodec/commit/36396ae))
+
 ## Unreleased
 
 * Add bounded-window DEFLATE encoding with per-block stored, fixed, or length-limited dynamic Huffman selection and the dedicated length-258 code.
