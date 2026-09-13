@@ -1,8 +1,8 @@
-# ZCodec
-
 <p align="center">
   <img src="screenshots/overview.png" alt="ZCodec package illustration" width="180">
 </p>
+
+# ZCodec
 
 ZCodec provides dependency-free, synchronous codecs for DEFLATE, zlib, GZIP, TAR, and ZIP data. Its compression engine and archive parsers are implemented entirely in Dart: they do not import `dart:io`, call a native zlib backend, or use FFI. The core API therefore works on the Dart VM and the Web.
 
