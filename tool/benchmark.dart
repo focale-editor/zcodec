@@ -27,7 +27,7 @@ void main(List<String> arguments) {
   final Uint8List text = _sampleData(2 * 1024 * 1024);
   final Random random = Random(1729);
   final Uint8List binary = Uint8List.fromList(List<int>.generate(2 * 1024 * 1024, (_) => random.nextInt(256)));
-  final Map<String, Uint8List> corpora = <String, Uint8List>{'text': text, 'random': binary, 'repeated': Uint8List(binary.length)};
+  final Map<String, Uint8List> corpora = <String, Uint8List>{'text': text, 'random': binary, 'repeated': Uint8List(binary.length), 'predicted': _predictedImage(1024, 2048)};
   final List<_Case> cases = <_Case>[];
   for (final MapEntry<String, Uint8List> corpus in corpora.entries) {
     for (final int level in <int>[0, 1, 6, 9]) {
@@ -108,6 +108,25 @@ List<Uint8List> _decodeInChunks(Converter<List<int>, List<int>> decoder, Uint8Li
   }
   sink.close();
   return output;
+}
+
+/// Builds 8-bit image rows after horizontal prediction, as PSD and TIFF store them.
+///
+/// Smooth gradients with slight noise leave small differences, a small
+/// alphabet on which three-byte hash chains degenerate.
+Uint8List _predictedImage(int width, int height) {
+  final Random random = Random(8);
+  final Uint8List data = Uint8List(width * height);
+  for (int row = 0; row < height; row++) {
+    int previous = 0;
+    for (int column = 0; column < width; column++) {
+      final double value = 0.5 + 0.25 * sin(column / 97) + 0.2 * cos(row / 131) + random.nextDouble() * 0.02;
+      final int sample = (value * 255).toInt();
+      data[row * width + column] = (sample - previous) & 0xff;
+      previous = sample;
+    }
+  }
+  return data;
 }
 
 /// Builds a seeded semi-compressible text corpus.

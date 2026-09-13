@@ -61,6 +61,52 @@ void main() {
       }
     });
 
+    test('switches dictionary keys between small- and large-alphabet blocks', () {
+      final Random random = Random(11);
+      final Uint8List input = Uint8List(65535 * 6 + 1000);
+      for (int index = 0; index < input.length; index++) {
+        final int region = index ~/ 65535;
+        input[index] = switch (region % 3) {
+          0 => random.nextInt(256),
+          1 => (index % 7) + random.nextInt(3),
+          _ => index >= 40 && random.nextInt(4) != 0 ? input[index - 40] : random.nextInt(256),
+        };
+      }
+      for (final int level in <int>[3, 4, 6, 9]) {
+        final Uint8List compressed = DeflateCodec(level: level).encode(input);
+        expect(const DeflateCodec().decode(compressed), orderedEquals(input), reason: 'level=$level');
+        final _Collector output = _Collector();
+        final ByteConversionSink encoder = DeflateEncoder(level: level).startChunkedConversion(output);
+        for (int offset = 0; offset < input.length; offset += 30001) {
+          encoder.add(Uint8List.sublistView(input, offset, min(offset + 30001, input.length)));
+        }
+        encoder.close();
+        expect(const DeflateCodec().decode(output.takeBytes()), orderedEquals(input), reason: 'chunked level=$level');
+      }
+    });
+
+    test('bit writer round-trips fields of every width through the bit reader', () {
+      final Random random = Random(13);
+      final List<int> widths = List<int>.generate(5000, (_) => random.nextInt(17));
+      final List<int> values = <int>[for (final int width in widths) random.nextInt(1 << 16) & ((1 << width) - 1)];
+      final BitWriter writer = BitWriter();
+      for (int index = 0; index < widths.length; index++) {
+        writer.writeBits(values[index], widths[index]);
+      }
+      // Pending bits taken out by a bulk writer must continue the stream.
+      final ({int bits, int count}) pending = writer.takePendingBits();
+      final Uint8List head = writer.takeCompleteBytes();
+      writer
+        ..writeBits(pending.bits & 0xff, min(pending.count, 8))
+        ..writeBits(pending.bits >>> 8, max(pending.count - 8, 0))
+        ..writeBits(0x5a5, 11);
+      final BitReader reader = BitReader(joinBytes(head, writer.takeBytes()));
+      for (int index = 0; index < widths.length; index++) {
+        expect(reader.readBits(widths[index]), values[index], reason: 'field $index');
+      }
+      expect(reader.readBits(11), 0x5a5);
+    });
+
     test('uses dynamic trees and recovers compression after random regions', () {
       final Uint8List input = Uint8List(65535 * 4);
       input.setRange(0, 65535, _randomBytes(65535));

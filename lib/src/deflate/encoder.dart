@@ -27,16 +27,26 @@ final class _DeflateEncoder {
 /// Reuses a fixed-size match dictionary across DEFLATE blocks.
 final class _DeflateBlockWriter {
   /// Destination bit stream.
-  final BitWriter output = BitWriter();
+  final BitWriter output;
 
   /// Compression effort.
   final int level;
 
-  /// Latest absolute position plus one for each three-byte hash.
+  /// Latest absolute position plus one for each chain key hash.
   late final Int32List _heads = Int32List(_mask + 1);
 
   /// Previous hash-chain links, indexed by position modulo the window size.
   late final Int32List _previous = Int32List(_mask + 1);
+
+  /// Latest absolute position plus one for each three-byte hash, maintained
+  /// only by blocks whose chains use four-byte keys.
+  late final Int32List _trigramHeads = Int32List(_mask + 1);
+
+  /// Absolute position of the first input byte not yet in the dictionary.
+  int _insertedEnd = 0;
+
+  /// Reusable storage for the complete bytes of serialized tokens.
+  Uint8List _tokenBytes = Uint8List(0);
 
   /// Dictionary mask, reduced for known short, single-buffer inputs.
   final int _mask;
@@ -51,7 +61,12 @@ final class _DeflateBlockWriter {
   static const List<int> _sufficientMatches = <int>[0, 16, 24, 32, 48, 64, 96, 128, 192, 258];
 
   /// Creates an empty block writer.
-  _DeflateBlockWriter(this.level, {int? inputLength}) : _mask = _dictionaryCapacity(inputLength ?? _windowSize) - 1;
+  ///
+  /// A known [inputLength] sizes the dictionary and, for stored output, the
+  /// exact output buffer.
+  _DeflateBlockWriter(this.level, {int? inputLength})
+    : _mask = _dictionaryCapacity(inputLength ?? _windowSize) - 1,
+      output = BitWriter(initialCapacity: level == 0 && inputLength != null ? _storedLength(inputLength) : 1024);
 
   /// Writes [input] from [start] to [end], retaining preceding dictionary data.
   ///
@@ -73,47 +88,92 @@ final class _DeflateBlockWriter {
     } else if (dynamic != null && dynamicCost < fixedCost) {
       output.writeBits((isFinal ? 1 : 0) | 4, 3);
       dynamic.writeHeader(output);
-      _writeTokens(output, tokens, dynamic.literalLengths, dynamic.literalCodes, dynamic.distanceLengths, dynamic.distanceCodes);
+      _writeTokens(tokens, dynamic.literalLengths, dynamic.literalCodes, dynamic.distanceLengths, dynamic.distanceCodes);
     } else {
       output.writeBits((isFinal ? 1 : 0) | 2, 3);
-      _writeTokens(output, tokens, _fixedLiteralLengths, _fixedLiteralCodes, _fixedDistanceLengths, _fixedDistanceCodes);
+      _writeTokens(tokens, _fixedLiteralLengths, _fixedLiteralCodes, _fixedDistanceLengths, _fixedDistanceCodes);
     }
     _position += length;
   }
 
   /// Builds literal and match tokens without serializing rejected candidates.
+  ///
+  /// Hash chains normally link positions sharing three bytes. On a small
+  /// alphabet, such as text or predicted image samples, three-byte strings
+  /// repeat so often that chains fill the window with candidates that rarely
+  /// extend, and the search slows down several times. Such blocks chain on
+  /// four bytes instead and look up three-byte matches in a table holding only
+  /// the latest occurrence, which is also the cheapest to encode. Fast levels
+  /// walk too few candidates for this to pay off.
+  ///
+  /// The dictionary, the token storage, and their counters live in local
+  /// variables for the whole block.
   _DeflateTokens _tokenize(Uint8List input, int start, int end) {
     final _DeflateTokens result = _DeflateTokens(end - start);
+    final Uint32List values = result.values;
+    final Uint32List literals = result.literals;
+    final Uint32List distances = result.distances;
+    int count = 0;
+    int matchCount = 0;
+    int extraBits = 0;
     final int origin = _position - start;
     final Int32List heads = _heads;
     final Int32List previous = _previous;
+    final Int32List? trigramHeads = level >= _fourByteChainLevel && end - start >= _smallAlphabetMinimumBlock && _hasSmallAlphabet(input, start, end) ? _trigramHeads : null;
     final int mask = _mask;
     final int maximumChain = _chainLengths[level];
     final int sufficient = _sufficientMatches[level];
-    // The last two positions of the previous block could not yet be hashed.
-    for (int index = start < 2 ? 0 : start - 2; index < start && index + 2 < end; index++) {
-      final int hash = _hash(input, index, mask);
-      final int absolute = index + origin;
-      previous[absolute & mask] = heads[hash];
-      heads[hash] = absolute + 1;
+    // Positions from here on have a complete chain key inside the block.
+    final int lastKey = end - (trigramHeads == null ? 3 : 4);
+    // The previous block could not insert its last positions without the
+    // bytes that follow them.
+    final int oldestPending = start - _windowSize;
+    for (int index = _insertedEnd - origin < oldestPending ? oldestPending : _insertedEnd - origin; index < start && index <= lastKey; index++) {
+      if (index >= 0) {
+        _insertPosition(heads, previous, trigramHeads, mask, input, index, index + origin);
+      }
     }
     int position = start;
     int missed = 0;
     while (position < end) {
       int bestLength = 0;
       int bestDistance = 0;
-      if (position + _minimumMatch <= end) {
+      if (position <= lastKey) {
         final int absolute = position + origin;
-        final int hash = _hash(input, position, mask);
+        final int oldest = absolute - _windowSize;
+        final int lowest = oldest < 0 ? 0 : oldest;
+        final int limit = end - position < _maximumMatch ? end - position : _maximumMatch;
+        final int firstByte = input[position];
+        final int trigram = (firstByte * 251 + input[position + 1]) * 251 + input[position + 2];
+        final int hash;
+        if (trigramHeads == null) {
+          hash = trigram & mask;
+        } else {
+          hash = (trigram * 251 + input[position + 3]) & mask;
+          final int trigramCandidate = trigramHeads[trigram & mask] - 1;
+          trigramHeads[trigram & mask] = absolute + 1;
+          final int source = trigramCandidate - origin;
+          if (trigramCandidate >= lowest && input[source] == firstByte && input[source + 1] == input[position + 1] && input[source + 2] == input[position + 2]) {
+            int length = 3;
+            while (length < limit && input[source + length] == input[position + length]) {
+              length++;
+            }
+            bestLength = length;
+            bestDistance = absolute - trigramCandidate;
+          }
+        }
         int candidate = heads[hash] - 1;
         previous[absolute & mask] = heads[hash];
         heads[hash] = absolute + 1;
-        int chain = maximumChain;
-        final int oldest = absolute - _windowSize;
-        final int limit = end - position < _maximumMatch ? end - position : _maximumMatch;
-        while (candidate >= 0 && candidate >= oldest && chain-- > 0) {
+        int chain = bestLength >= sufficient || bestLength == limit ? 0 : maximumChain;
+        // A candidate can only improve on the best match if it agrees on the
+        // last matched byte and the one just past it, which rejects most
+        // candidates with two reads.
+        int scanStart = bestLength == 0 ? 0 : bestLength - 1;
+        int scan = chain == 0 ? 0 : (input[position + scanStart] << 8) | input[position + bestLength];
+        while (candidate >= lowest && chain-- > 0) {
           final int source = candidate - origin;
-          if (input[source + bestLength] == input[position + bestLength] && input[source] == input[position]) {
+          if (((input[source + scanStart] << 8) | input[source + bestLength]) == scan && input[source] == firstByte) {
             int length = 1;
             while (length < limit && input[source + length] == input[position + length]) {
               length++;
@@ -124,6 +184,8 @@ final class _DeflateBlockWriter {
               if (length >= sufficient || length == limit) {
                 break;
               }
+              scanStart = length - 1;
+              scan = (input[position + scanStart] << 8) | input[position + length];
             }
           }
           // Inserting the current position overwrites the oldest ring slot.
@@ -136,17 +198,22 @@ final class _DeflateBlockWriter {
       }
       if (bestLength >= _minimumMatch) {
         missed = 0;
-        result.addMatch(bestLength, bestDistance);
+        values[count++] = (bestDistance << 9) | bestLength;
+        final int lengthSymbol = _lengthSymbols[bestLength];
+        final int distanceSymbol = _distanceSymbol(bestDistance);
+        literals[257 + lengthSymbol]++;
+        distances[distanceSymbol]++;
+        extraBits += _lengthExtraBits[lengthSymbol] + _distanceExtraBits[distanceSymbol];
+        matchCount++;
         final int matchEnd = position + bestLength;
-        for (int index = position + 1; index < matchEnd && index + 2 < end; index++) {
-          final int hash = _hash(input, index, mask);
-          final int absolute = index + origin;
-          previous[absolute & mask] = heads[hash];
-          heads[hash] = absolute + 1;
+        for (int index = position + 1; index < matchEnd && index <= lastKey; index++) {
+          _insertPosition(heads, previous, trigramHeads, mask, input, index, index + origin);
         }
         position = matchEnd;
       } else {
-        result.addLiteral(input[position++]);
+        final int literal = input[position++];
+        values[count++] = literal;
+        literals[literal]++;
         missed++;
         // Back off unsuccessful searches, but still populate every dictionary
         // position. A compressible region therefore resumes full matching at
@@ -154,17 +221,101 @@ final class _DeflateBlockWriter {
         final int skip = missed >>> 5;
         final int probeEnd = position + (skip < 16 ? skip : 16);
         while (position < end && position < probeEnd) {
-          if (position + 2 < end) {
-            final int hash = _hash(input, position, mask);
-            final int absolute = position + origin;
-            previous[absolute & mask] = heads[hash];
-            heads[hash] = absolute + 1;
+          if (position <= lastKey) {
+            _insertPosition(heads, previous, trigramHeads, mask, input, position, position + origin);
           }
-          result.addLiteral(input[position++]);
+          final int skipped = input[position++];
+          values[count++] = skipped;
+          literals[skipped]++;
         }
       }
     }
+    if (lastKey + 1 + origin > _insertedEnd) {
+      _insertedEnd = lastKey + 1 + origin;
+    }
+    result
+      ..count = count
+      ..matchCount = matchCount
+      ..extraBits = extraBits;
     return result;
+  }
+
+  /// Writes a token sequence and its end-of-block symbol.
+  ///
+  /// Bits accumulate in local variables and complete bytes go to a reusable
+  /// buffer, which is much cheaper than one [BitWriter.writeBits] call per
+  /// code. Two bytes are flushed after each field once 16 bits are pending, so
+  /// adding a field of up to 16 bits never exceeds 32 bits, which keeps shifts
+  /// exact on the Web.
+  void _writeTokens(_DeflateTokens tokens, Uint8List literalLengths, Uint16List literalCodes, Uint8List distanceLengths, Uint16List distanceCodes) {
+    // A token takes at most 48 bits: a length code and its extra bits, then a
+    // distance code and its extra bits.
+    final int capacity = tokens.count * 6 + 6;
+    if (_tokenBytes.length < capacity) {
+      _tokenBytes = Uint8List(capacity);
+    }
+    final Uint8List bytes = _tokenBytes;
+    final Uint32List values = tokens.values;
+    final ({int bits, int count}) pending = output.takePendingBits();
+    int bits = pending.bits;
+    int bitCount = pending.count;
+    int length = 0;
+    for (int index = 0; index <= tokens.count; index++) {
+      final int token = index == tokens.count ? 256 : values[index];
+      if (token <= 256) {
+        bits |= literalCodes[token] << bitCount;
+        bitCount += literalLengths[token];
+      } else {
+        final int matchLength = token & 511;
+        final int distance = token >>> 9;
+        final int lengthSymbol = _lengthSymbols[matchLength];
+        final int distanceSymbol = _distanceSymbol(distance);
+        bits |= literalCodes[257 + lengthSymbol] << bitCount;
+        bitCount += literalLengths[257 + lengthSymbol];
+        if (bitCount >= 16) {
+          bytes[length] = bits & 0xff;
+          bytes[length + 1] = (bits >>> 8) & 0xff;
+          length += 2;
+          bits >>>= 16;
+          bitCount -= 16;
+        }
+        bits |= (matchLength - _lengthBases[lengthSymbol]) << bitCount;
+        bitCount += _lengthExtraBits[lengthSymbol];
+        if (bitCount >= 16) {
+          bytes[length] = bits & 0xff;
+          bytes[length + 1] = (bits >>> 8) & 0xff;
+          length += 2;
+          bits >>>= 16;
+          bitCount -= 16;
+        }
+        bits |= distanceCodes[distanceSymbol] << bitCount;
+        bitCount += distanceLengths[distanceSymbol];
+        if (bitCount >= 16) {
+          bytes[length] = bits & 0xff;
+          bytes[length + 1] = (bits >>> 8) & 0xff;
+          length += 2;
+          bits >>>= 16;
+          bitCount -= 16;
+        }
+        bits |= (distance - _distanceBases[distanceSymbol]) << bitCount;
+        bitCount += _distanceExtraBits[distanceSymbol];
+      }
+      if (bitCount >= 16) {
+        bytes[length] = bits & 0xff;
+        bytes[length + 1] = (bits >>> 8) & 0xff;
+        length += 2;
+        bits >>>= 16;
+        bitCount -= 16;
+      }
+    }
+    while (bitCount >= 8) {
+      bytes[length++] = bits & 0xff;
+      bits >>>= 8;
+      bitCount -= 8;
+    }
+    output
+      ..writeBytes(Uint8List.sublistView(bytes, 0, length))
+      ..writeBits(bits, bitCount);
   }
 
   /// Keeps long-lived streams inside the signed 32-bit dictionary range.
@@ -176,8 +327,10 @@ final class _DeflateBlockWriter {
     for (int index = 0; index < _windowSize; index++) {
       _heads[index] = _heads[index] > shift ? _heads[index] - shift : 0;
       _previous[index] = _previous[index] > shift ? _previous[index] - shift : 0;
+      _trigramHeads[index] = _trigramHeads[index] > shift ? _trigramHeads[index] - shift : 0;
     }
     _position -= shift;
+    _insertedEnd -= shift;
   }
 }
 
@@ -222,27 +375,6 @@ final class _DeflateTokens {
   }
 }
 
-/// Writes a token sequence and its end-of-block symbol.
-void _writeTokens(BitWriter output, _DeflateTokens tokens, Uint8List literalLengths, Uint16List literalCodes, Uint8List distanceLengths, Uint16List distanceCodes) {
-  for (int index = 0; index < tokens.count; index++) {
-    final int token = tokens.values[index];
-    if (token < 256) {
-      output.writeBits(literalCodes[token], literalLengths[token]);
-    } else {
-      final int length = token & 511;
-      final int distance = token >>> 9;
-      final int lengthSymbol = _lengthSymbols[length];
-      final int distanceSymbol = _distanceSymbol(distance);
-      output
-        ..writeBits(literalCodes[257 + lengthSymbol], literalLengths[257 + lengthSymbol])
-        ..writeBits(length - _lengthBases[lengthSymbol], _lengthExtraBits[lengthSymbol])
-        ..writeBits(distanceCodes[distanceSymbol], distanceLengths[distanceSymbol])
-        ..writeBits(distance - _distanceBases[distanceSymbol], _distanceExtraBits[distanceSymbol]);
-    }
-  }
-  output.writeBits(literalCodes[256], literalLengths[256]);
-}
-
 /// Writes one byte-aligned stored block with its length and complement.
 void _writeStoredBlock(BitWriter output, Uint8List input, int start, int end, {required bool isFinal}) {
   final int length = end - start;
@@ -256,8 +388,53 @@ void _writeStoredBlock(BitWriter output, Uint8List input, int start, int end, {r
     ..writeBytes(Uint8List.sublistView(input, start, end));
 }
 
-/// Hashes three consecutive bytes into the dictionary.
-int _hash(Uint8List input, int position, int mask) => ((input[position] * 251 + input[position + 1]) * 251 + input[position + 2]) & mask;
+/// Links [position] into the hash chains of the current block.
+///
+/// Without [trigramHeads], chains are keyed by the three bytes at [position];
+/// otherwise by four bytes, and [trigramHeads] records the three-byte key. Both
+/// hashes stay below 2^33 before masking, so they are exact on the Web too.
+@pragma('vm:prefer-inline')
+void _insertPosition(Int32List heads, Int32List previous, Int32List? trigramHeads, int mask, Uint8List input, int position, int absolute) {
+  final int trigram = (input[position] * 251 + input[position + 1]) * 251 + input[position + 2];
+  final int hash;
+  if (trigramHeads == null) {
+    hash = trigram & mask;
+  } else {
+    trigramHeads[trigram & mask] = absolute + 1;
+    hash = (trigram * 251 + input[position + 3]) & mask;
+  }
+  previous[absolute & mask] = heads[hash];
+  heads[hash] = absolute + 1;
+}
+
+/// Lowest compression level whose small-alphabet blocks chain on four bytes.
+const int _fourByteChainLevel = 4;
+
+/// Number of distinct byte values below which blocks chain on four bytes.
+const int _smallAlphabet = 64;
+
+/// Shortest block whose alphabet is considered: shorter blocks trivially use
+/// few byte values but are too short for long chains to form.
+const int _smallAlphabetMinimumBlock = 4096;
+
+/// Whether [input] from [start] to [end] uses fewer than [_smallAlphabet]
+/// distinct byte values.
+bool _hasSmallAlphabet(Uint8List input, int start, int end) {
+  final Uint8List seen = Uint8List(256);
+  int distinct = 0;
+  for (int index = start; index < end; index++) {
+    if (seen[input[index]] == 0) {
+      seen[input[index]] = 1;
+      if (++distinct == _smallAlphabet) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/// Returns the size of [length] bytes written as stored blocks.
+int _storedLength(int length) => length + 5 * (length == 0 ? 1 : (length + _maximumStoredBlock - 1) ~/ _maximumStoredBlock);
 
 /// Chooses a power-of-two table without overallocating for tiny entries.
 int _dictionaryCapacity(int length) {
