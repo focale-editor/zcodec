@@ -1,5 +1,9 @@
 # ZCodec
 
+<p align="center">
+  <img src="screenshots/overview.png" alt="ZCodec package illustration" width="180">
+</p>
+
 ZCodec provides dependency-free, synchronous codecs for DEFLATE, zlib, GZIP, TAR, and ZIP data. Its compression engine and archive parsers are implemented entirely in Dart: they do not import `dart:io`, call a native zlib backend, or use FFI. The core API therefore works on the Dart VM and the Web.
 
 ## Usage
@@ -173,3 +177,7 @@ Output boundaries need not match input boundaries. Decoders can emit bytes befor
 - Proprietary PKWARE Strong Encryption is detected and rejected explicitly; it is distinct from WinZip AES and requires separately licensed PKWARE technology.
 
 All compression, archive parsing, checksums, ZipCrypto, AES, SHA-1, HMAC, and PBKDF2 code is implemented in Dart. ZCodec uses only Dart SDK libraries and has no runtime package dependencies.
+
+---
+
+Built for **[Focale](https://focale-editor.app)**, an advanced local image editor. Discover what these packages make possible in a real creative workflow.

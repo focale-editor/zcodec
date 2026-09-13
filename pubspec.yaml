@@ -4,6 +4,17 @@ version: 0.2.0
 homepage: https://github.com/focale-editor/zcodec
 repository: https://github.com/focale-editor/zcodec
 
+topics:
+  - compression
+  - archive
+  - zip
+  - gzip
+  - codec
+
+screenshots:
+  - description: 'A flat illustration of compression and archive codecs.'
+    path: screenshots/overview.png
+
 environment:
   sdk: '>=3.13.0 <4.0.0'
 
