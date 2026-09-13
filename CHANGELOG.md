@@ -1,5 +1,11 @@
 # 📰 ZCodec changelog
 
+## v0.2.2
+Released on September 13, 2026.
+
+* **DOCS**: Updated README. ([#a3a4f7a](https://github.com/focale-editor/zcodec/commit/a3a4f7a))
+* **CHORE**: Optimized DEFLATE encoding and bit writing. ([#23de373](https://github.com/focale-editor/zcodec/commit/23de373))
+
 ## v0.2.1
 Released on September 13, 2026.
 
