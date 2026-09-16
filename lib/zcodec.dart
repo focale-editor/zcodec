@@ -7,6 +7,7 @@ library;
 
 export 'dart:convert' show Codec, Converter;
 
+export 'src/checksums.dart' show Adler32Accumulator, Crc32Accumulator, adler32, crc32;
 export 'src/codecs.dart' show BinaryCodec, BinaryDecoder, BinaryEncoder, ByteCodec, ByteDecoder, ByteEncoder, defaultCompressionLevel;
 export 'src/deflate.dart' show DeflateCodec, DeflateDecodeResult, DeflateDecoder, DeflateEncoder;
 export 'src/exception.dart';

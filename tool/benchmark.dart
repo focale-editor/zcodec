@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:zcodec/src/checksums.dart';
 import 'package:zcodec/src/crypto.dart';
 import 'package:zcodec/zcodec.dart';
 

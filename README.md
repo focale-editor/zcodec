@@ -27,6 +27,20 @@ const fast = DeflateCodec(level: 1);
 const bounded = ZlibCodec(maxOutputBytes: 64 * 1024 * 1024);
 ```
 
+CRC-32 and Adler-32 are also available from `package:zcodec/zcodec.dart`:
+
+```dart
+final int checksum = crc32(payload);
+final Crc32Accumulator chunkChecksum = Crc32Accumulator()
+  ..add(chunkType)
+  ..add(payload);
+final int combinedChecksum = chunkChecksum.value;
+```
+
+Use `adler32` or `Adler32Accumulator` for Adler-32. Reading an accumulator's
+`value` preserves its state, so more chunks can be added afterwards. Typed
+byte buffers use the optimized checksum loops without concatenating chunks.
+
 Decode a `.tar.gz` file such as a source release:
 
 ```dart

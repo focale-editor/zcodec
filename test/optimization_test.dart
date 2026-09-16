@@ -4,7 +4,6 @@ import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:test/test.dart';
-import 'package:zcodec/src/checksums.dart';
 import 'package:zcodec/src/deflate.dart' show buildDeflateHuffmanLengths;
 import 'package:zcodec/src/io.dart';
 import 'package:zcodec/zcodec.dart';
@@ -230,6 +229,27 @@ void main() {
   });
 
   group('Checksums', () {
+    test('public accumulators preserve state when their values are read', () {
+      // Arrange.
+      final Crc32Accumulator crc = Crc32Accumulator();
+      final Adler32Accumulator adler = Adler32Accumulator();
+      final Uint8List input = Uint8List.fromList(ascii.encode('123456789'));
+
+      // Act and assert across both the list and typed-buffer paths.
+      expect(crc.value, 0);
+      expect(adler.value, 1);
+      crc.add(<int>[49, 50, 51, 52]);
+      adler.add(<int>[49, 50, 51, 52]);
+      expect(crc.value, crc32(input.sublist(0, 4)));
+      expect(adler.value, adler32(input.sublist(0, 4)));
+      crc.add(Uint8List.sublistView(input, 4));
+      adler.add(Uint8List.sublistView(input, 4));
+      crc.add(const <int>[]);
+      adler.add(const <int>[]);
+      expect(crc.value, 0xcbf43926);
+      expect(adler.value, 0x091e01de);
+    });
+
     test('match bitwise references for typed buffers, views, and lists', () {
       expect(crc32(ascii.encode('123456789')), 0xcbf43926);
       expect(adler32(ascii.encode('Wikipedia')), 0x11e60398);
