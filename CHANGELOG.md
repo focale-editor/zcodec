@@ -1,5 +1,10 @@
 # 📰 ZCodec changelog
 
+## v0.2.3
+Released on September 17, 2026.
+
+* **CHORE**: Now exposing CRC-32, Adler-32, and their incremental accumulators through the public library for reuse by binary container codecs. ([#12218f8](https://github.com/focale-editor/zcodec/commit/12218f8))
+
 ## v0.2.2
 Released on September 13, 2026.
 
