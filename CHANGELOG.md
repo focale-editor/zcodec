@@ -1,5 +1,10 @@
 # 📰 ZCodec changelog
 
+## v0.2.4
+Released on October 5, 2026.
+
+* **DOCS**: Updated package overview screenshot. ([#c8d7e77](https://github.com/focale-editor/zcodec/commit/c8d7e77))
+
 ## v0.2.3
 Released on September 17, 2026.
 
