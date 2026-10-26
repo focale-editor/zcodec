@@ -4,3 +4,6 @@ docs/
 AGENTS.md
 analysis_options.yaml
 zcodec.iml
+
+# Local corpus downloads, generated runners and benchmark binaries.
+build/

@@ -9,3 +9,4 @@ import 'dart:typed_data';
 
 part 'crypto/aes.dart';
 part 'crypto/sha1.dart';
+part 'crypto/sha256.dart';

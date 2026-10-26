@@ -3,7 +3,7 @@ part of 'package:zcodec/src/codecs.dart';
 /// Compresses and decompresses a byte stream.
 ///
 /// This is the shape shared by [BinaryCodec]s whose decoded form is also a
-/// byte sequence, such as DEFLATE, zlib, and GZIP.
+/// byte sequence, such as DEFLATE, zlib, GZIP, BZIP2 and XZ.
 abstract base class ByteCodec extends BinaryCodec<List<int>> {
   /// Creates a byte codec.
   const ByteCodec();
@@ -26,7 +26,7 @@ abstract base class ByteEncoder extends BinaryEncoder<List<int>> {
   /// Buffers every chunk and compresses them as one input on close.
   ///
   /// This fallback preserves one logical stream across all input chunks.
-  /// DEFLATE, zlib, and GZIP encoders override it with bounded incremental
+  /// The streaming byte encoders override it with bounded incremental
   /// compression that retains the dictionary between chunks.
   @override
   ByteConversionSink startChunkedConversion(Sink<List<int>> sink) => _BufferingByteSink<List<int>>(sink, convert);

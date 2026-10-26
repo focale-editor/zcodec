@@ -4,7 +4,7 @@
 
 # ZCodec
 
-ZCodec provides dependency-free, synchronous codecs for DEFLATE, zlib, GZIP, TAR, and ZIP data. Its compression engine and archive parsers are implemented entirely in Dart: they do not import `dart:io`, call a native zlib backend, or use FFI. The core API therefore works on the Dart VM and the Web.
+ZCodec provides dependency-free, synchronous codecs for DEFLATE, zlib, GZIP, BZIP2, XZ/LZMA2, TAR, and ZIP data. Its compression engine and archive parsers are implemented entirely in Dart: they do not import `dart:io`, call a native zlib backend, or use FFI. The core API therefore works on the Dart VM and the Web.
 
 ## Usage
 
@@ -162,6 +162,8 @@ ZIP entries decoded from an archive are inflated lazily. Call `ZipEntry.release(
 | `DeflateCodec`    | `List<int>`        | raw RFC 1951 stream |
 | `ZlibCodec`       | `List<int>`        | RFC 1950 stream     |
 | `GzipCodec`       | `List<int>`        | RFC 1952 file       |
+| `Bzip2Codec`      | `List<int>`        | BZIP2 members      |
+| `XzCodec`         | `List<int>`        | XZ/LZMA2 streams   |
 | `GzipMemberCodec` | `List<GzipMember>` | RFC 1952 file       |
 | `TarCodec`        | `TarArchive`       | TAR archive         |
 | `ZipCodec`        | `ZipArchive`       | ZIP archive         |
