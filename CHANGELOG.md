@@ -1,5 +1,10 @@
 # 📰 ZCodec changelog
 
+## v0.2.5
+Released on October 26, 2026.
+
+* **FEAT**: Added BZIP2 and XZ/LZMA2 byte codecs. ([#9f712aa](https://github.com/focale-editor/zcodec/commit/9f712aa))
+
 ## v0.2.4
 Released on October 5, 2026.
 
@@ -22,15 +27,6 @@ Released on September 13, 2026.
 * **DOCS**: Added contributing guide, package screenshot, and pubspec metadata. ([#7135b22](https://github.com/focale-editor/zcodec/commit/7135b22))
 * **FEAT**: Added incremental streaming codecs and dynamic Huffman DEFLATE encoding. ([#d5fb84c](https://github.com/focale-editor/zcodec/commit/d5fb84c))
 * **CHORE**: Optimized DEFLATE decoding and checksum calculations. ([#36396ae](https://github.com/focale-editor/zcodec/commit/36396ae))
-
-## Unreleased
-
-* Add bounded-window DEFLATE encoding with per-block stored, fixed, or length-limited dynamic Huffman selection and the dedicated length-258 code.
-* Make DEFLATE, zlib, and GZIP byte stream conversions incremental. Output may now arrive before close and before final integrity validation; expansion limits remain cumulative.
-* Prepare split ZIP entries once, avoiding duplicate compression, encryption, and password/salt callbacks. Honor asynchronous backpressure for stored ZIP streams and reject overlapping writes or finalization after a failed entry.
-* Reduce decompression copy overhead, Huffman table memory, and retained capacity in small decoded buffers. Avoid unnecessary ZIP checksums when verification is disabled and process GZIP members sequentially.
-* Make long TAR path handling linear and reuse encoded path fields.
-* Add reproducible VM/Web benchmarks and regression tests for block boundaries, native interoperability, fragmented streams, output limits, and slow destinations.
 
 ## v0.2.0
 Released on August 27, 2026.
