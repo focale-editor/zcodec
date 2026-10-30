@@ -3,12 +3,15 @@ import 'dart:typed_data';
 
 import 'package:zcodec/zcodec.dart';
 
-/// Demonstrates zlib, TAR/GZIP, and ZIP round trips.
+/// Demonstrates zlib, Zstandard, TAR/GZIP, and ZIP round trips.
 void main() {
   const ZlibCodec zlib = ZlibCodec();
   final List<int> message = utf8.encode('Hello ZCodec');
   final List<int> compressed = zlib.encode(message);
   print(utf8.decode(zlib.decode(compressed)));
+
+  const ZstdCodec zstandard = ZstdCodec(maxInputBytes: 1024, maxOutputBytes: 1024);
+  print(utf8.decode(zstandard.decode(zstandard.encode(message))));
 
   // TAR carries no compression of its own, so `.tar.gz` is TAR fused with GZIP.
   final Codec<TarArchive, List<int>> tarGzip = const TarCodec().fuse(const GzipCodec(header: GzipHeader(name: 'hello.tar')));

@@ -4,7 +4,7 @@
 
 # ZCodec
 
-ZCodec provides dependency-free, synchronous codecs for DEFLATE, zlib, GZIP, BZIP2, XZ/LZMA2, TAR, and ZIP data. Its compression engine and archive parsers are implemented entirely in Dart: they do not import `dart:io`, call a native zlib backend, or use FFI. The core API therefore works on the Dart VM and the Web.
+ZCodec provides dependency-free, synchronous codecs for DEFLATE, zlib, GZIP, BZIP2, XZ/LZMA2, Zstandard, TAR, and ZIP data. Its compression engines and archive parsers are implemented entirely in Dart: they do not import `dart:io`, call a native backend, or use FFI. The core API therefore works on the Dart VM and the Web.
 
 ## Usage
 
@@ -26,6 +26,24 @@ Conversion options belong to the codec, so a configured codec is a value you can
 const fast = DeflateCodec(level: 1);
 const bounded = ZlibCodec(maxOutputBytes: 64 * 1024 * 1024);
 ```
+
+Compress Zstandard data or decode it with explicit resource limits:
+
+```dart
+const ZstdCodec zstandard = ZstdCodec(
+  level: 6,
+  maxInputBytes: 16 * 1024 * 1024,
+  maxOutputBytes: 64 * 1024 * 1024,
+  maxWindowBytes: 32 * 1024 * 1024,
+);
+final List<int> encoded = zstandard.encode(payload);
+final List<int> decoded = zstandard.decode(encoded);
+```
+
+For dictionary-compressed input, supply the raw or trained dictionary to
+`ZstdDecoder(dictionary: dictionaryBytes, maxOutputBytes: limit)`. The decoder
+owns a copy and verifies trained dictionary IDs. Dictionary encoding and
+training are not provided.
 
 CRC-32 and Adler-32 are also available from `package:zcodec/zcodec.dart`:
 
@@ -164,6 +182,7 @@ ZIP entries decoded from an archive are inflated lazily. Call `ZipEntry.release(
 | `GzipCodec`       | `List<int>`        | RFC 1952 file       |
 | `Bzip2Codec`      | `List<int>`        | BZIP2 members      |
 | `XzCodec`         | `List<int>`        | XZ/LZMA2 streams   |
+| `ZstdCodec`       | `List<int>`        | RFC 8878 frames    |
 | `GzipMemberCodec` | `List<GzipMember>` | RFC 1952 file       |
 | `TarCodec`        | `TarArchive`       | TAR archive         |
 | `ZipCodec`        | `ZipArchive`       | ZIP archive         |
@@ -178,11 +197,21 @@ await destination.addStream(source.transform(const GzipCodec().encoder));
 
 Output boundaries need not match input boundaries. Decoders can emit bytes before a later checksum, truncation, or output-limit error is discovered: treat output as provisional until the stream completes successfully. `maxOutputBytes` applies cumulatively, including across GZIP members. The single-buffer `encode`/`decode` methods remain synchronous. `GzipMemberCodec`, `TarCodec`, and `ZipCodec` decoders still buffer chunked input to return complete structured values.
 
+Zstandard conversion buffers the input until close. Its decoder checks
+`maxInputBytes` as chunks arrive, validates the complete result, then emits one
+output. `maxOutputBytes` applies across concatenated frames; `maxWindowBytes`
+defaults to 128 MiB and also bounds dictionary size. Zstandard encoding uses
+64 KiB blocks and a 128 KiB advertised window. Level zero stores bytes; levels
+one through nine control bounded match-search effort. They do not correspond to
+the reference `zstd` command's levels. Encoding uses raw literals and predefined
+sequence tables, so compression ratios need not match the reference encoder.
+
 ## Safety and format support
 
 - DEFLATE encoding and decoding support stored, fixed-Huffman, and dynamic-Huffman blocks. The encoder chooses the smallest estimated block representation and uses a bounded match dictionary at every compression level.
 - zlib validates its header and Adler-32 trailer.
 - GZIP supports optional name, comment, extra, timestamp, text, OS, and header-checksum fields; concatenated members; CRC-32 and ISIZE validation; and output/member limits.
+- Zstandard decodes raw, repeated and compressed blocks, Huffman literals and all FSE sequence modes, raw and trained dictionaries, concatenated frames and skippable frames. XXH64 content checksums are always verified when present. Reserved fields, invalid distances, truncation and size mismatches are rejected. Encoding includes a checksum by default and accepts inputs below 4 GiB.
 - TAR decoding supports V7-compatible and POSIX ustar headers, GNU base-256 numbers, GNU long names and links, global and local PAX headers, links, devices, directories, FIFOs, and unknown vendor typeflags. TAR encoding emits ustar with automatic PAX extensions.
 - Legacy GNU sparse and GNU sparse PAX entries are detected and rejected explicitly because reconstructing sparse file holes requires a distinct extraction contract.
 - ZIP supports stored and DEFLATE entries, UTF-8 names, comments, DOS timestamps, CRC-32 validation, classic and ZIP64 data descriptors, ZIP64 end records, and lazy extraction.
@@ -193,6 +222,12 @@ Output boundaries need not match input boundaries. Decoders can emit bytes befor
 - Proprietary PKWARE Strong Encryption is detected and rejected explicitly; it is distinct from WinZip AES and requires separately licensed PKWARE technology.
 
 All compression, archive parsing, checksums, ZipCrypto, AES, SHA-1, HMAC, and PBKDF2 code is implemented in Dart. ZCodec uses only Dart SDK libraries and has no runtime package dependencies.
+
+The Zstandard implementation follows [RFC 8878](https://www.rfc-editor.org/rfc/rfc8878.html)
+and the [XXH64 specification](https://github.com/Cyan4973/xxHash/blob/dev/doc/xxhash_spec.md).
+Its portable regression tests run on the VM and Node. The additional
+`test/zstd_interop_test.dart` checks both directions and dictionaries against an
+installed `zstd` command; it reports a skip when that executable is unavailable.
 
 ---
 

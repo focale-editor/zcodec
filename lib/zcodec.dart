@@ -17,3 +17,4 @@ export 'src/tar.dart';
 export 'src/xz.dart';
 export 'src/zip.dart';
 export 'src/zlib.dart';
+export 'src/zstd.dart';
