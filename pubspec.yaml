@@ -1,6 +1,6 @@
 name: zcodec
 description: Dependency-free pure Dart codecs for DEFLATE, zlib, GZIP, BZIP2, XZ, Zstandard, TAR, and ZIP data.
-version: 0.2.5
+version: 0.2.6
 homepage: https://github.com/focale-editor/zcodec
 repository: https://github.com/focale-editor/zcodec
 

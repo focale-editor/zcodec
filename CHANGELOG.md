@@ -1,5 +1,10 @@
 # 📰 ZCodec changelog
 
+## v0.2.6
+Released on October 31, 2026.
+
+* **FEAT**: Added pure Dart Zstandard encoding and decoding. ([#28a87f6](https://github.com/focale-editor/zcodec/commit/28a87f6))
+
 ## v0.2.5
 Released on October 26, 2026.
 
